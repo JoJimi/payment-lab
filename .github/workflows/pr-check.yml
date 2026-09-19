@@ -1,0 +1,134 @@
+name: PR Check
+
+on:
+  pull_request:
+    branches: [main]
+    # ⚠️ 여기에 paths 필터를 쓰지 말 것 — required check이 영구 pending 상태가 되어
+    #    조건에 안 맞는 PR이 영구히 머지 불가가 됨 (docs/roadmap.md R.G10 참고)
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  JAVA_VERSION: '21'
+
+jobs:
+  # ─────────────────────────────────────────────
+  # 빌드 + 전체 테스트 (Boot 4 "조용한 실패" 3종 검증 포함 — R.CI6)
+  # ─────────────────────────────────────────────
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+
+      - name: Build & Test
+        run: ./gradlew build --no-daemon
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-reports
+          path: '**/build/reports/tests/**'
+          retention-days: 7
+
+  # ─────────────────────────────────────────────
+  # SAST — Semgrep
+  # ─────────────────────────────────────────────
+  sast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      # 공식 semgrep 컨테이너 이미지에는 Node가 없어 upload-sarif 단계가 실패하므로 pip 설치로 대체
+      - run: pip install semgrep
+
+      - name: Semgrep scan (ERROR 발견 시 실패)
+        run: |
+          semgrep scan \
+            --config p/java \
+            --config p/secrets \
+            --config p/owasp-top-ten \
+            --config .semgrep/ \
+            --severity ERROR \
+            --sarif --output semgrep.sarif \
+            --error
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@ed1a0fa18ac745d017ca370dd4ef08bba3b4f504 # v3
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  # ─────────────────────────────────────────────
+  # SCA (의존성) — Trivy filesystem
+  # ─────────────────────────────────────────────
+  sca-dependency:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # gradle.lockfile이 커밋되어 있어야 Trivy가 Java 의존성을 인식함.
+      # 락파일이 없으면 취약점 0건으로 "조용히" 통과한다 (R.CI4).
+      - name: Verify lockfile exists
+        run: |
+          test -f gradle.lockfile || {
+            echo "::error::gradle.lockfile이 없습니다. ./gradlew dependencies --write-locks 결과를 커밋하세요."
+            exit 1
+          }
+
+      - name: Trivy fs scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true      # 패치 없는 CVE는 차단하지 않음 (docs/roadmap.md 부록 E-1)
+          exit-code: '1'            # ← 병합 차단의 실제 지점
+          format: sarif
+          output: trivy-fs.sarif
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}   # trivy-db rate limit 회피
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@ed1a0fa18ac745d017ca370dd4ef08bba3b4f504 # v3
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+  # ─────────────────────────────────────────────
+  # sca-image (컨테이너 이미지 스캔)는 여기서 만들지 않음.
+  # 지금은 Jib/Dockerfile이 없어 이미지를 빌드할 수 없고, 5.1~5.2에서
+  # 베이스 이미지(distroless 등)를 정한 뒤 붙여야 Trivy 게이트가 상시
+  # 빨간불이 되지 않는다 (docs/roadmap.md 부록 E-1, 5.2).
+  # 5단계에서 이 파일에 sca-image 잡을 추가하고 branch ruleset의
+  # required status checks에도 등록할 것.
+  # ─────────────────────────────────────────────

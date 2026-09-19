@@ -1,0 +1,141 @@
+spring:
+  application:
+    name: payment-lab   # 2단계에서 서비스가 4개로 쪼개지면 로그/메트릭에서 서비스를 구분하는 키가 됨
+
+  profiles:
+    active: dev
+
+  datasource:
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    # OSIV(Open Session In View) 비활성.
+    # 켜두면 컨트롤러 응답이 끝날 때까지 커넥션을 붙잡고 있어서
+    # 1-D 동시성 실험(요청 300건)에서 풀 고갈의 원인이 락인지 OSIV인지 구분이 안 됨.
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+        # N+1 방지. 연관 엔티티를 100개씩 묶어 IN 절로 조회.
+        # 1단계 벤치마크에서 N+1 때문에 생긴 지연을 락 경합으로 오해하지 않기 위함.
+        default_batch_fetch_size: 100
+        jdbc:
+          # DB에는 UTC(timestamptz)로 저장, 표시할 때만 KST 변환.
+          # 결제는 시각 자체가 증거라 나중에 바꾸면 기존 데이터 해석이 애매해짐.
+          # Hibernate 7은 native query 반환 타입이 java.time 계열로 바뀌었으므로
+          # 지금 고정해두면 1.1 ERD 작성 때 타입 고민이 줄어듦.
+          time_zone: UTC
+
+  flyway:
+    locations: classpath:db/migration
+    # false = 빈 DB에서 V1부터 순서대로 실행.
+    # true 는 "이미 스키마가 있는 기존 DB에 Flyway를 도입"할 때 쓰는 옵션이라
+    # 신규 프로젝트에서 켜면 V1이 조용히 건너뛰어질 수 있음.
+    baseline-on-migrate: false
+
+  data:
+    redis:
+      timeout: 3000
+      repositories:
+        enabled: false
+    elasticsearch:
+      uris: http://localhost:9200   # 4단계까지는 컨테이너가 없음. dev 프로파일에서 health check 비활성 처리
+
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: payment-lab-group
+      # latest = 가입 시점 이후 메시지만 소비.
+      # 컨테이너를 새로 띄우거나 group-id를 바꾸면 그 전 이벤트를 통째로 건너뛰므로
+      # 2단계 완료 기준("유실 0")을 검증할 때 설정 때문에 유실이 발생함.
+      # 학습 환경에서는 earliest 로 전부 확인.
+      auto-offset-reset: earliest
+    producer:
+      acks: all                       # 모든 ISR 복제본이 받아야 성공 처리
+      properties:
+        enable.idempotence: true      # acks=all 과 짝. 프로듀서 재시도 시 브로커 레벨 중복 방지
+        # (컨슈머 측 중복은 2.8 processed_event 테이블로 별도 방어)
+
+server:
+  port: 8080
+  shutdown: graceful
+
+spring.lifecycle:
+  # graceful shutdown 유예 시간(기본 30s).
+  # 5.9 에서 K8s terminationGracePeriodSeconds 와 맞춰야 하므로 명시.
+  # 이 값보다 terminationGracePeriodSeconds 가 커야 진행 중 요청이 잘리지 않음.
+  timeout-per-shutdown-phase: 20s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus,metrics
+  metrics:
+    distribution:
+      # ── percentiles-histogram 과 percentiles 는 서로 다른 물건 ──
+      # histogram: 버킷 데이터를 내보내고 Grafana가 histogram_quantile() 로 계산.
+      #            여러 인스턴스를 합산해도 수학적으로 정확함.
+      percentiles-histogram:
+        http.server.requests: true
+      # percentiles: 각 인스턴스가 자기 데이터로 미리 계산한 값.
+      #              p95 두 개를 평균낸 건 p95가 아니므로 인스턴스가 여러 개면 거짓말을 함.
+      # TODO(5.11): HPA로 파드를 늘린 뒤 두 값이 어떻게 갈라지는지 비교하고,
+      #             확인 끝나면 percentiles 는 제거하고 histogram 만 남길 것.
+      percentiles:
+        http.server.requests: 0.5,0.95,0.99
+      # TODO(1.19): 커스텀 메트릭(락 대기 시간 등)도 여기에 히스토그램을 따로 걸어야
+      #             분포가 잡힘. http.server.requests 설정은 그 메트릭에 적용되지 않음.
+  tracing:
+    sampling:
+      # 1.0 = 전 요청 추적. 학습용이라 전수 추적.
+      # 운영에서는 비용 때문에 0.1 같은 값을 씀.
+      probability: 1.0
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      mockPg:
+        # false 로 둔 이유: true 면 서킷이 OPEN될 때 /actuator/health 가 DOWN이 됨.
+        # 3단계에서 Mock PG를 죽여 서킷을 여는 순간 내 서비스는 멀쩡한데 DOWN으로 표시되고,
+        # 5단계에서 이 상태로 readiness probe를 붙이면 외부 장애 때 내 파드가 빠져버림.
+        # (3단계 목표인 "장애 전파 차단"과 정확히 반대)
+        # 서킷 상태 관찰은 health가 아니라 Micrometer 메트릭 + Grafana로 함(3.8).
+        register-health-indicator: false
+        sliding-window-size: 10                        # 최근 10건으로 실패율 판단
+        minimum-number-of-calls: 5                     # 5건 미만이면 판단 보류 (표본 부족)
+        failure-rate-threshold: 50                     # 실패율 50% 초과 시 OPEN
+        wait-duration-in-open-state: 10s               # OPEN 유지 시간. 이후 HALF_OPEN
+        permitted-number-of-calls-in-half-open-state: 3 # HALF_OPEN에서 시험 통과시킬 요청 수
+        # TODO(3.2): 위 4개 값을 바꿔가며 상태 전이가 어떻게 달라지는지 기록할 것.
+
+  retry:
+    instances:
+      mockPg:
+        max-attempts: 3
+        wait-duration: 500ms
+        # 아래는 3단계에서 켤 것. 지금은 일부러 고정 간격으로 둠.
+        # 고정 간격 → 여러 클라이언트의 재시도가 한꺼번에 몰리는 thundering herd 관찰
+        # → 그 다음 백오프+지터를 켜서 비교 (3.3). "한 번에 한 개념만" 원칙.
+        #        enable-exponential-backoff: true
+        #        exponential-backoff-multiplier: 2
+        #        enable-randomized-wait: true
+        #        randomized-wait-factor: 0.5
+        # 주의(3.3): 재시도를 붙이기 전에 그 호출이 멱등한지 먼저 확인할 것.
+        #            멱등하지 않은 결제 요청을 재시도하면 이중 승인이 남.
+
+  timelimiter:
+    instances:
+      mockPg:
+        timeout-duration: 3s
+        # 주의(3.4): @TimeLimiter 는 CompletableFuture 반환 타입에만 동작함.
+        #            그리고 타임아웃된 결제의 상태는 FAILED 가 아니라 UNKNOWN.
+        #            PG는 승인했는데 응답만 못 받았을 수 있음.
+        # 주의: Retry(3회) × TimeLimiter(3s) 조합이면 최악 9초가 걸림.
+        #       3단계 완료 기준은 "PG 완전 다운 시 주문 API가 3초 안에 응답"이므로
+        #       데코레이터 적용 순서(3.1)에 따라 이 기준의 달성 여부가 갈림.
+
+logging:
+  level:
+    root: INFO
+    org.example: DEBUG

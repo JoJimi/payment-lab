@@ -1,0 +1,21 @@
+version: 2
+updates:
+  - package-ecosystem: gradle
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      spring:
+        patterns: ["org.springframework*"]
+      test:
+        patterns: ["*junit*", "*testcontainers*", "*mockito*"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+
+  # docker 생태계는 Dockerfile/Jib이 생기는 5단계(5.1)에서 추가할 것.
+  # 지금은 이미지를 빌드하지 않으므로 감시 대상이 없음.
