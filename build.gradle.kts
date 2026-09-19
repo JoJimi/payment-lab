@@ -92,7 +92,7 @@ dependencies {
     implementation("io.micrometer:micrometer-tracing-bridge-brave")
 
     // ---- 구조화 로깅 (JSON + traceId MDC) ----
-    implementation("net.logstash.logback:logstash-logback-encoder:8.0")
+    implementation("net.logstash.logback:logstash-logback-encoder:9.0")
 
     // ---- Elasticsearch (검색 / RAG 벡터스토어) ----
     // implementation("org.springframework.boot:spring-boot-starter-data-elasticsearch")
