@@ -45,7 +45,7 @@ dependencyManagement {
 
 dependencies {
     // Spring AI 2.0 = Boot 4.0/4.1 + Framework 7 라인. 1.x는 Boot 3.5 전용이라 사용 불가.
-    implementation(platform("org.springframework.ai:spring-ai-bom:2.0.0"))
+    implementation(platform("org.springframework.ai:spring-ai-bom:2.0.1"))
 
     // Testcontainers 2.x: 모듈명이 testcontainers-* 접두사로 변경됨
     testImplementation(platform("org.testcontainers:testcontainers-bom:2.0.5"))
@@ -92,7 +92,7 @@ dependencies {
     implementation("io.micrometer:micrometer-tracing-bridge-brave")
 
     // ---- 구조화 로깅 (JSON + traceId MDC) ----
-    implementation("net.logstash.logback:logstash-logback-encoder:8.0")
+    implementation("net.logstash.logback:logstash-logback-encoder:9.0")
 
     // ---- Elasticsearch (검색 / RAG 벡터스토어) ----
     // implementation("org.springframework.boot:spring-boot-starter-data-elasticsearch")
