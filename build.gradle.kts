@@ -31,6 +31,16 @@ dependencyManagement {
     imports {
         mavenBom("org.springframework.ai:spring-ai-bom:${property("springAiVersion")}")
     }
+
+    // Boot 4.1.1 BOM이 관리하는 전이 의존성 중 Trivy(sca-dependency)가 탐지한 CVE 수정 버전으로 강제 상향.
+    // Tomcat: FORM 인증 우회 / DIGEST 재전송 공격 / 접근 제어 우회 (11.0.24 → 11.0.26)
+    // lz4-java: XXHash JNI 검증 미흡으로 인한 DoS (1.10.1 → 1.11.3)
+    dependencies {
+        dependency("org.apache.tomcat.embed:tomcat-embed-core:11.0.26")
+        dependency("org.apache.tomcat.embed:tomcat-embed-el:11.0.26")
+        dependency("org.apache.tomcat.embed:tomcat-embed-websocket:11.0.26")
+        dependency("at.yawk.lz4:lz4-java:1.11.3")
+    }
 }
 
 dependencies {
