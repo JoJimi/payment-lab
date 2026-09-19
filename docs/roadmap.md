@@ -85,7 +85,7 @@ Boot 4는 **조용한 실패**가 많습니다. 빌드도 기동도 성공하는
 
 ### R-A. 리포지토리 생성
 
-- [ ] **R.G1** 레포 생성 — 이름 `payment-lab`, public, README/`.gitignore`(Java)/LICENSE(MIT) 포함
+- [x] **R.G1** 레포 생성 — 이름 `payment-lab`, public, README/`.gitignore`(Java)/LICENSE(MIT) 포함
 - [x] **R.G2** `.gitignore` 보강 — `.env`, `*.local.yml`, `logs/`, `build/`, `.gradle/`, `*.sarif`
   - **0단계에서 만든 `logs/payment-lab.json`이 커밋되지 않게 반드시 확인.** ECS 로그에 결제 페이로드가 들어갑니다.
 - [ ] **R.G3** 기존 로컬 프로젝트를 푸시하기 전에 **히스토리에 시크릿이 없는지 확인**
@@ -103,8 +103,8 @@ Boot 4는 **조용한 실패**가 많습니다. 빌드도 기동도 성공하는
 
 > **이 단계를 건너뛰면 CI 전체가 장식이 됩니다.** 워크플로가 실패해도 required status check으로 등록하지 않으면 머지 버튼은 그대로 눌립니다.
 
-- [ ] **R.G9** Settings → Rules → Rulesets → New branch ruleset, target `main`
-- [ ] **R.G10** 규칙 활성화
+- [x] **R.G9** Settings → Rules → Rulesets → New branch ruleset, target `main`
+- [x] **R.G10** 규칙 활성화
   - Restrict deletions / Block force pushes
   - Require a pull request before merging (approvals는 1인 프로젝트이므로 0)
   - **Require status checks to pass** — 아래 잡 이름을 정확히 등록
@@ -114,7 +114,8 @@ Boot 4는 **조용한 실패**가 많습니다. 빌드도 기동도 성공하는
     - `sca-image`
   - Require branches to be up to date before merging
   - Require linear history
-- [ ] **R.G11** 본인을 bypass list에 넣을지 결정 — **넣지 마세요.** 급할 때 우회할 수 있으면 게이트는 의미가 없습니다. 정말 막히면 그때 일시적으로 규칙을 끄고, 왜 껐는지 기록하세요.
+- [x] **R.G11** 본인을 bypass list에 넣을지 결정 — **넣지 마세요.** 급할 때 우회할 수 있으면 게이트는 의미가 없습니다. 정말 막히면 그때 일시적으로 규칙을 끄고, 왜 껐는지 기록하세요.
+  - bypass list는 비워둠. 최초 부트스트랩 커밋 1회만 Ruleset을 `Disabled`로 전환 후 즉시 재활성화 (docs/stages/01-repository-ci.md 기록)
 
 > ⚠️ **함정**: 워크플로에 `on.pull_request.paths` 필터를 걸면, 조건에 안 맞는 PR에서 해당 잡이 아예 실행되지 않고 → required check이 영원히 "Expected" 상태로 남아 → **PR이 영구히 머지 불가**가 됩니다.
 > 필터는 워크플로 트리거가 아니라 **잡 내부**(`dorny/paths-filter` + `if:`)에서 걸거나, 스킵 시 성공으로 리포트하는 더미 잡을 두세요. 이 프로젝트는 2단계에서 멀티모듈이 되면 반드시 마주칩니다.
@@ -164,7 +165,10 @@ Boot 4는 **조용한 실패**가 많습니다. 빌드도 기동도 성공하는
   - docker 생태계는 Dockerfile/Jib이 생기는 5단계에서 추가 (지금은 감시 대상 없음)
 - [x] **R.CI8** 최소 권한 설정 — 워크플로 최상단 `permissions: contents: read`, 필요한 잡에만 `security-events: write` 추가
 - [x] **R.CI9** 액션 버전 핀 — 공급망 공격 방어. 태그 대신 커밋 SHA로 핀하고 Dependabot이 갱신하게 함
-- [ ] **R.CI10** **게이트 검증** — 취약 코드를 일부러 넣고 PR을 올려 실제로 막히는지 확인
+- [x] **R.CI10** **게이트 검증** — 취약 코드를 일부러 넣고 PR을 올려 실제로 막히는지 확인
+  - 계획한 방식(일부러 넣고 되돌리기) 대신, Dependabot PR #1~#8이 Boot 4.1.1 BOM의
+    실제 CRITICAL CVE(Tomcat 등)로 `sca-dependency`에 막히는 걸 그대로 관측함 →
+    PR #9로 해소. 실전 검증이 계획된 검증을 대신함 (docs/ci-cd.md 실전 검증 기록)
   - SAST: 하드코딩 비밀번호, `Runtime.exec(사용자입력)` 같은 명백한 패턴
   - SCA: `commons-collections:3.2.1` 등 알려진 CRITICAL 의존성을 임시 추가
   - **막히는 걸 눈으로 본 뒤 되돌리세요.** 설정만 해두고 검증 안 하면 동작한다고 착각하게 됩니다.
@@ -179,23 +183,24 @@ CodeRabbit은 **GitHub App**이라 Actions 워크플로가 필요 없습니다. 
 | Trivy | 알려진 취약 **버전** | 결정적 · 차단 |
 | CodeRabbit | 설계 의도 위반, 로직 결함, 놓친 예외 | 비결정적 · 조언 |
 
-- [ ] **R.CR1** CodeRabbit GitHub App 설치, `payment-lab` 레포에 권한 부여 (계정 작업 — 수동)
+- [x] **R.CR1** CodeRabbit GitHub App 설치, `payment-lab` 레포에 권한 부여 (계정 작업 — 수동)
 - [x] **R.CR2** `.coderabbit.yaml` 작성 — 부록 D-4
 - [x] **R.CR3** **`path_instructions`에 이 프로젝트의 설계 규칙을 자연어로 등록** — 이게 CodeRabbit을 쓰는 진짜 이유입니다. Semgrep 룰로는 표현하기 어려운 도메인 규칙을 검사하게 만들 수 있습니다.
   - 결제 경로: 금액에 `double`/`float` 금지, 외부 PG 호출이 DB 트랜잭션 안에 들어가지 않을 것
   - Saga 경로: `KafkaTemplate` 직접 호출 금지(Outbox 경유), 보상 트랜잭션의 멱등성
   - 컨슈머 경로: `processed_event` 체크 누락 여부
-- [ ] **R.CR4** **required status check으로 등록하지 않기.** LLM 리뷰는 비결정적이라 같은 코드에서도 결과가 달라질 수 있습니다. 필수 체크로 걸면 리뷰 코멘트 하나 때문에 머지가 막히고, 결국 앱을 꺼버리게 됩니다. 조언으로 두고 판단은 본인이 하세요.
+- [x] **R.CR4** **required status check으로 등록하지 않기.** LLM 리뷰는 비결정적이라 같은 코드에서도 결과가 달라질 수 있습니다. 필수 체크로 걸면 리뷰 코멘트 하나 때문에 머지가 막히고, 결국 앱을 꺼버리게 됩니다. 조언으로 두고 판단은 본인이 하세요.
 - [ ] **R.CR5** 리뷰 코멘트 중 **수용한 것만 골라 대응** — "왜 이 지적을 받아들이지 않았는가"를 PR에 한 줄로 남기면 그 자체가 학습 기록이 됩니다
 - [ ] **R.CR6** 1~2주 운영 후 `.coderabbit.yaml` 재조정 — 반복되는 노이즈는 `path_filters`로 제외
 
-### 완료 기준
+### 완료 기준 — ✅ 전부 달성 (2026-09-20, 상세: docs/stages/01-repository-ci.md)
 
-- 취약 코드를 넣은 PR이 **실제로 머지 버튼이 잠긴 상태**로 확인됨 (R.CI10 증거 캡처)
-- Security 탭에 Semgrep/Trivy SARIF 결과가 누적됨
-- CodeRabbit이 PR에 자동 리뷰를 남김
-- 정상 PR의 CI 전체 소요 시간 **10분 이내**
-- `main` 직접 푸시가 거부됨
+- [x] 취약 코드를 넣은 PR이 **실제로 머지 버튼이 잠긴 상태**로 확인됨 (R.CI10 증거 캡처)
+  — 계획한 합성 검증 대신 PR #1~#8이 실제 Tomcat CRITICAL CVE로 막혔다가 #9로 해소됨
+- [x] Security 탭에 Semgrep/Trivy SARIF 결과가 누적됨
+- [x] CodeRabbit이 PR에 자동 리뷰를 남김 (PR #9 확인)
+- [x] 정상 PR의 CI 전체 소요 시간 **10분 이내** (실측 약 2분)
+- [x] `main` 직접 푸시가 거부됨 (최초 부트스트랩 1회 예외 후 계속 유지)
 
 ---
 
@@ -1509,15 +1514,15 @@ flowchart TB
 - [ ] `00-foundation.md` ~ `06-kubernetes.md` — DoD 달성 증거, 배운 것, 예상과 달랐던 것
 
 **파이프라인**
-- [ ] `.github/workflows/pr-check.yml`
-- [ ] `.github/workflows/release.yml`
-- [ ] `.github/dependabot.yml`
-- [ ] `.github/pull_request_template.md`
-- [ ] `.semgrep/*.yml` — 프로젝트 커스텀 룰
-- [ ] `.coderabbit.yaml`
-- [ ] `.trivyignore` — 만료일과 사유가 적힌 예외 목록
-- [ ] `docs/ci-cd.md` — 게이트 정책, 예외 처리 절차, 롤백 절차
-- [ ] `docs/README.md` — 문서 인덱스 (어디서부터 읽을지)
+- [x] `.github/workflows/pr-check.yml`
+- [ ] `.github/workflows/release.yml` (5단계)
+- [x] `.github/dependabot.yml`
+- [x] `.github/pull_request_template.md`
+- [x] `.semgrep/*.yml` — 프로젝트 커스텀 룰 (money-no-floating-point; outbox 룰은 2단계)
+- [x] `.coderabbit.yaml`
+- [ ] `.trivyignore` — 만료일과 사유가 적힌 예외 목록 (아직 예외 필요 없음 — CVE는 버전 상향으로 해소)
+- [x] `docs/ci-cd.md` — 게이트 정책, 예외 처리 절차, 롤백 절차
+- [x] `docs/README.md` — 문서 인덱스 (어디서부터 읽을지)
 
 **인프라**
 - [ ] `k8s/` — Kustomize 기반 재현 가능한 매니페스트
