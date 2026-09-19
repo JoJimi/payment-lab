@@ -47,7 +47,7 @@ CI/CD 설정 전문(부록 D), 파이프라인 운영(부록 E), 문서 체계(�
 | 문서 | 영역 | 상태 |
 |---|---|---|
 | [`00-spring-boot-4.md`](troubleshooting/00-spring-boot-4.md) | 자동 설정, 스타터 매핑, 테스트 슬라이스 | ✅ |
-| `01-ci-pipeline.md` | required check, paths 필터, Trivy 락파일 | R단계 |
+| [`01-ci-pipeline.md`](troubleshooting/01-ci-pipeline.md) | Testcontainers 좌표, gradlew 실행 권한, 로컬-CI 인프라 불일치, Boot BOM CVE | ✅ |
 | `02-concurrency.md` | 데드락, 낙관적 락 재시도, 커넥션 풀 고갈 | 1단계 |
 | `03-kafka-saga.md` | 리밸런싱, 중복 소비, DLQ, Outbox 릴레이 | 2단계 |
 | `04-resilience.md` | 데코레이터 순서, 타임아웃 전파, Bulkhead | 3단계 |
@@ -58,8 +58,8 @@ CI/CD 설정 전문(부록 D), 파이프라인 운영(부록 E), 문서 체계(�
 각 단계 완료 시 DoD 달성 증거, 내린 결정, 막혔던 것, **예상과 달랐던 것**을 정리합니다.
 `00-foundation.md` ~ `06-kubernetes.md`.
 
-### ci-cd.md
-게이트 정책, 취약점 예외 처리 절차, 롤백 절차. R단계 완료 시 작성.
+### [ci-cd.md](ci-cd.md)
+게이트 정책, 취약점 예외 처리 절차, 롤백 절차, R단계 실전 검증 기록. ✅
 
 ---
 

@@ -3,9 +3,9 @@
 결제 도메인으로 백엔드 CS 개념(동시성 제어, 분산 트랜잭션, 이벤트 아키텍처, 성능 최적화)을
 단계적으로 구현하는 **학습 프로젝트**입니다. 기능 완성이 아니라 "왜 어려운지를 숫자로 증명"이 목표입니다.
 
-- 현재 단계: **R단계 진행 중** — CI 파이프라인 로컬 산출물(워크플로/Semgrep/CodeRabbit
-  설정/조용한 실패 검증 테스트) 완료. GitHub 레포 생성·Ruleset·CodeRabbit 앱 설치는
-  계정 작업이라 사용자가 직접 진행 중 (docs/stages/01-repository-ci.md 참고)
+- 현재 단계: **R단계 완료 → 1단계 착수 준비** — CI 게이트(build-test/sast/sca-dependency)
+  전부 실전 검증됨. Dependabot PR 7개 + CI 인프라 수정 PR 2개(#8, #9)를 병합하며
+  R.CI10을 실전 CVE로 대신 증명함 (docs/stages/01-repository-ci.md 참고)
 - 상세 로드맵: @docs/roadmap.md
 - 설계 배경 / 기술 선택 이유: @README.md
 - **Spring Boot 4 함정과 결정 기록: @docs/troubleshooting/00-spring-boot-4.md**
