@@ -6,4 +6,8 @@ public class PaymentOrderMismatchException extends RuntimeException {
     public PaymentOrderMismatchException(String message) {
         super(message);
     }
+
+    public PaymentOrderMismatchException(String message, Throwable cause) {
+        super(message, cause);
+    }
 }

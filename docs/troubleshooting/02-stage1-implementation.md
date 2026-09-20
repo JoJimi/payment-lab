@@ -834,6 +834,48 @@ wait_for_app_ready
 
 ---
 
+### 24. `DataIntegrityViolationException` 처리가 다른 제약 위반까지 주문 충돌로 오분류
+
+**증상**
+21번에서 추가한 catch 블록이 `DataIntegrityViolationException`이면 무조건
+"이미 처리 중이거나 완료된 결제가 있는 주문입니다"로 변환했다. 하지만 `payments` 테이블에는
+`idempotency_key` 유니크 제약도 있어서, 그쪽이 위반돼도 같은 예외 타입으로 올라온다 — 원인이
+다른데 같은 메시지로 뭉개진다.
+
+**원인**
+`saveAndFlush()`가 던질 수 있는 `DataIntegrityViolationException`의 원인이 여러 개(제약이
+2개)인데, catch 블록은 예외 "타입"만 보고 어느 제약이 위반됐는지 구분하지 않았다. 부수적으로
+PMD가 지적한 대로 원본 예외 `e`를 cause로 남기지도 않아 스택트레이스도 끊겼다.
+
+**해결**
+```java
+if (isActiveOrderConflict(e)) {
+    throw new PaymentOrderMismatchException(
+            "이미 처리 중이거나 완료된 결제가 있는 주문입니다: orderId=" + request.orderId(), e);
+}
+throw e;
+
+private static boolean isActiveOrderConflict(DataIntegrityViolationException e) {
+    Throwable cause = e.getMostSpecificCause();
+    return cause.getMessage() != null && cause.getMessage().contains("ux_payments_active_order");
+}
+```
+PostgreSQL은 제약 위반 메시지에 제약 이름을 그대로 포함시킨다
+(`duplicate key value violates unique constraint "ux_payments_active_order"`) — 그 문자열로
+정확히 어느 제약이 위반됐는지 구분하고, `ux_payments_active_order`가 아니면 원본 예외를 그대로
+다시 던진다(cause 체인도 보존).
+
+**영향 범위**
+결제 요청 API — `idempotency_key` 중복처럼 21번과 무관한 제약 위반이 엉뚱하게 "주문 충돌"
+409로 응답될 뻔했다.
+
+**재발 방지**
+같은 예외 타입을 여러 제약이 공유할 수 있는 테이블에서는, catch한 예외를 도메인 예외로 번역하기
+전에 항상 "이 catch가 정말 내가 의도한 그 제약만 잡는가"를 확인한다 — 타입만 보고 번역하면
+관계없는 실패까지 같이 삼킨다.
+
+---
+
 ## 요약
 
 | # | 분류 | 파일 | 한 줄 요약 |
@@ -861,3 +903,4 @@ wait_for_app_ready
 | 21 | 리뷰(2차) | `V2__domain_schema.sql`/`PaymentService.java` | 주문별 활성 결제 부분 유니크 인덱스로 TOCTOU 차단 |
 | 22 | 리뷰(2차) | `IdempotencyAspect.java`/`IdempotencyRecord.java` | 멱등 키 재사용 시 요청 본문 지문(SHA-256) 검증 |
 | 23 | 리뷰(2차) | 벤치마크 스크립트 2개 | `wait_for_app_ready` 타임아웃 시에도 `APP_PID` 정리 (EXIT 트랩) |
+| 24 | 리뷰(3차) | `PaymentService.java` | `DataIntegrityViolationException`을 제약 이름으로 구분 (다른 제약 위반까지 주문 충돌로 오분류하던 문제) |

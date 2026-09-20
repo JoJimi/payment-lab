@@ -86,6 +86,11 @@ public class PaymentService {
         return a.compareTo(b) != 0;
     }
 
+    private static boolean isActiveOrderConflict(DataIntegrityViolationException e) {
+        Throwable cause = e.getMostSpecificCause();
+        return cause.getMessage() != null && cause.getMessage().contains("ux_payments_active_order");
+    }
+
     private Long savePending(String idempotencyKey, RequestPaymentRequest request) {
         try {
             return transactionTemplate.execute(status -> {
@@ -99,7 +104,15 @@ public class PaymentService {
             // validateOrder()의 읽기 시점 검사(order.payable())는 TOCTOU에 취약하다 — 서로 다른
             // 멱등키를 쓴 두 요청이 동시에 통과할 수 있다. ux_payments_active_order 유니크
             // 인덱스가 진짜 방어선이고, 여기서 그 위반을 도메인 예외로 번역한다.
-            throw new PaymentOrderMismatchException("이미 처리 중이거나 완료된 결제가 있는 주문입니다: orderId=" + request.orderId());
+            //
+            // payments 테이블에는 idempotency_key 유니크 제약도 있어 같은 예외 타입으로 보고될
+            // 수 있다 — 제약 이름을 확인해서 ux_payments_active_order 위반일 때만 주문 충돌로
+            // 번역하고, 그 외(예: idempotency_key 중복)는 원래 예외를 그대로 던진다.
+            if (isActiveOrderConflict(e)) {
+                throw new PaymentOrderMismatchException(
+                        "이미 처리 중이거나 완료된 결제가 있는 주문입니다: orderId=" + request.orderId(), e);
+            }
+            throw e;
         }
     }
 
