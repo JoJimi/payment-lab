@@ -126,6 +126,14 @@ dependencies {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+    // 기본 콘솔 출력은 예외 타입+위치만 보여주고 메시지/전체 스택트레이스를 생략한다.
+    // CI 로그만으로 원인을 진단할 수 있어야 하므로(로컬 재현이 항상 가능한 건 아님) 켜둔다.
+    testLogging {
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        showStackTraces = true
+        showCauses = true
+        events("failed")
+    }
 }
 
 // @Idempotent(key = "#idempotencyKey") 같은 SpEL이 파라미터 이름을 리플렉션으로 읽어야 하므로 필요.

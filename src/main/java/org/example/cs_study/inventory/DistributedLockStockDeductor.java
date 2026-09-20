@@ -19,7 +19,9 @@ import org.springframework.transaction.support.TransactionTemplate;
 @Component
 class DistributedLockStockDeductor implements StockDeductor {
 
-    private static final long WAIT_SECONDS = 3;
+    // 300-way 경합(1.12)에서도 뒤쪽 대기자가 자기 차례를 기다릴 수 있을 만큼 넉넉하게 잡는다.
+    // 락 보유 시간(LEASE)은 짧은 DB 트랜잭션 하나뿐이라 실제로는 대부분 곧바로 풀린다.
+    private static final long WAIT_SECONDS = 10;
     private static final long LEASE_SECONDS = 5;
 
     private final InventoryRepository inventoryRepository;

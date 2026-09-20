@@ -34,9 +34,18 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * {@code inventory.lock-strategy} 4종 전부를 (스프링 컨텍스트 하나로) 직접 비교한다 —
  * 컨텍스트가 뜰 때 4개 {@link StockDeductor} 구현체가 전부 빈으로 등록되고,
  * {@code InventoryService}가 그중 하나만 기본으로 쓸 뿐이라 개별 구현체를 바로 주입받을 수 있다.
+ *
+ * <p>{@code max-retries}를 큰 값으로 올려둔 이유: 낙관적 락은 재시도 횟수가 유한하면
+ * 극단적 경합(행 1개에 300-way)에서 "재고는 남아 있는데 재시도를 다 써서 실패"하는
+ * 경우가 실제로 생긴다 — 이건 버그가 아니라 낙관적 락의 알려진 트레이드오프이고,
+ * 그 트레이드오프 자체는 1.14(재시도 1/3/5/10 곡선)에서 측정한다. 이 테스트(1.12)의
+ * 목적은 "재고 초과 판매가 없다(안전성)"를 증명하는 것이지 "재시도 3번이면 항상 충분하다"가
+ * 아니므로, 여기서는 재시도를 넉넉히 줘서 안전성 불변식만 검증한다.
  */
 @Testcontainers
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
+@SpringBootTest(
+        webEnvironment = SpringBootTest.WebEnvironment.NONE,
+        properties = "inventory.optimistic-lock.max-retries=500")
 class InventoryConcurrencyTest {
 
     private static final int INITIAL_STOCK = 100;
@@ -150,7 +159,11 @@ class InventoryConcurrencyTest {
                         try {
                             deductor.deduct(productId, 1);
                             success.incrementAndGet();
-                        } catch (InsufficientStockException e) {
+                        } catch (InsufficientStockException
+                                | org.springframework.orm.ObjectOptimisticLockingFailureException
+                                | InventoryLockTimeoutException e) {
+                            // 재고 부족(정상)뿐 아니라 낙관적 락 재시도 소진/분산 락 대기 타임아웃도
+                            // "이번엔 못 가져갔다"는 같은 의미의 실패로 센다 (경합 상황에서는 실제로 발생 가능).
                             failure.incrementAndGet();
                         }
                         return null;
