@@ -119,14 +119,14 @@ class InventoryConcurrencyTest {
 
         // 락이 없으면 "재고 부족" 체크 자체가 stale read에 속아 100건보다 훨씬 많이 통과한다
         // (Lost Update). 정확한 통과 건수는 스케줄링에 따라 달라지므로 "100건보다 많다"만 단언한다.
+        //
+        // finalAvailable(최종 DB 값)은 단언하지 않는다 — UPDATE가 매번 "읽은 값 - 1"을 절대값으로
+        // 덮어쓰므로 최종 상태는 races가 몇 번 있었는지가 아니라 어느 스레드가 "가장 마지막에" 쓰는지에만
+        // 좌우된다. 중간에 Lost Update가 여러 번 나도 마지막 writer가 우연히 정상적인 값을 읽었다면
+        // 최종 값은 0이 될 수 있다 — successCount > 100 자체가 이미 Lost Update의 충분한 증거다.
         assertThat(result.successCount())
                 .as("락 없이는 재고 부족 검증이 경합으로 무력화되어 100건보다 많이 성공해야 함 (Lost Update)")
                 .isGreaterThan(INITIAL_STOCK);
-
-        Integer finalAvailable = readAvailableDirectly(productId);
-        assertThat(finalAvailable)
-                .as("Lost Update로 실제 차감분과 DB에 반영된 값이 어긋나 0이 아니어야 함")
-                .isNotZero();
     }
 
     private void assertExactlyStockSizeSucceeds(InventoryLockStrategy strategy) throws Exception {
