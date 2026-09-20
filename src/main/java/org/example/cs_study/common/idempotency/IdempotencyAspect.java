@@ -1,5 +1,6 @@
 package org.example.cs_study.common.idempotency;
 
+import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
@@ -50,14 +51,19 @@ public class IdempotencyAspect {
     private final StringRedisTemplate redisTemplate;
     private final IdempotencyRecordRepository repository;
     private final ObjectMapper objectMapper;
+    private final MeterRegistry meterRegistry;
     private final ExpressionParser parser = new SpelExpressionParser();
     private final ParameterNameDiscoverer nameDiscoverer = new DefaultParameterNameDiscoverer();
 
     public IdempotencyAspect(
-            StringRedisTemplate redisTemplate, IdempotencyRecordRepository repository, ObjectMapper objectMapper) {
+            StringRedisTemplate redisTemplate,
+            IdempotencyRecordRepository repository,
+            ObjectMapper objectMapper,
+            MeterRegistry meterRegistry) {
         this.redisTemplate = redisTemplate;
         this.repository = repository;
         this.objectMapper = objectMapper;
+        this.meterRegistry = meterRegistry;
     }
 
     @Around("@annotation(idempotent)")
@@ -101,6 +107,7 @@ public class IdempotencyAspect {
             record.complete(200, json);
             repository.save(record);
             trySetRedis(redisAvailable, redisKey, COMPLETED_PREFIX + json, redisTtl);
+            meterRegistry.counter("idempotency.requests", "result", "miss").increment(); // 1.19: 최초 실행(캐시 미스)
             return result;
         } catch (Throwable ex) {
             repository.delete(record);
@@ -165,6 +172,8 @@ public class IdempotencyAspect {
     }
 
     private Object deserialize(String json, Class<?> returnType) {
+        // 1.19: 원본 응답을 재현하는 모든 경로(캐시 히트)가 이 메서드 하나로 모인다.
+        meterRegistry.counter("idempotency.requests", "result", "hit").increment();
         return objectMapper.readValue(json, returnType);
     }
 

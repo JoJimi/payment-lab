@@ -1,5 +1,6 @@
 package org.example.cs_study.payment;
 
+import io.micrometer.core.instrument.MeterRegistry;
 import org.example.cs_study.common.idempotency.Idempotent;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -9,10 +10,12 @@ public class PaymentService {
 
     private final PaymentRepository paymentRepository;
     private final MockPgClient mockPgClient;
+    private final MeterRegistry meterRegistry;
 
-    public PaymentService(PaymentRepository paymentRepository, MockPgClient mockPgClient) {
+    public PaymentService(PaymentRepository paymentRepository, MockPgClient mockPgClient, MeterRegistry meterRegistry) {
         this.paymentRepository = paymentRepository;
         this.mockPgClient = mockPgClient;
+        this.meterRegistry = meterRegistry;
     }
 
     /**
@@ -32,6 +35,8 @@ public class PaymentService {
             case FAILED -> payment.fail();
             case TIMEOUT -> payment.markUnknown();
         }
+        // 1.19: 결제 성공/실패(+UNKNOWN) 카운터. status 태그로 나눠 Grafana에서 비율을 본다.
+        meterRegistry.counter("payment.result", "status", payment.getStatus().name()).increment();
         return PaymentResponse.from(payment);
     }
 

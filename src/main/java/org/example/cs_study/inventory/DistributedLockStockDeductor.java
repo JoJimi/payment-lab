@@ -1,5 +1,7 @@
 package org.example.cs_study.inventory;
 
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import java.util.concurrent.TimeUnit;
 import org.example.cs_study.common.catalog.ProductNotFoundException;
 import org.redisson.api.RLock;
@@ -23,11 +25,16 @@ class DistributedLockStockDeductor implements StockDeductor {
     private final InventoryRepository inventoryRepository;
     private final RedissonClient redissonClient;
     private final TransactionTemplate transactionTemplate;
+    private final MeterRegistry meterRegistry;
 
     DistributedLockStockDeductor(
-            InventoryRepository inventoryRepository, RedissonClient redissonClient, PlatformTransactionManager transactionManager) {
+            InventoryRepository inventoryRepository,
+            RedissonClient redissonClient,
+            PlatformTransactionManager transactionManager,
+            MeterRegistry meterRegistry) {
         this.inventoryRepository = inventoryRepository;
         this.redissonClient = redissonClient;
+        this.meterRegistry = meterRegistry;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         // REQUIRES_NEW: 락을 푸는 시점(finally)보다 DB 커밋이 먼저 끝나야 한다. 바깥 트랜잭션에
         // 합류하면(REQUIRED) 커밋은 바깥 메서드가 끝날 때까지 미뤄지는데 락은 여기서 먼저 풀려서,
@@ -44,11 +51,15 @@ class DistributedLockStockDeductor implements StockDeductor {
     public void deduct(Long productId, int quantity) {
         RLock lock = redissonClient.getLock("inventory-lock:" + productId);
         boolean locked;
+        // 1.19: tryLock 자체가 "락을 기다린 시간"이다.
+        Timer.Sample sample = Timer.start(meterRegistry);
         try {
             locked = lock.tryLock(WAIT_SECONDS, LEASE_SECONDS, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("재고 분산 락 대기 중 인터럽트됨", e);
+        } finally {
+            sample.stop(meterRegistry.timer("inventory.lock.wait", "strategy", "DISTRIBUTED"));
         }
         if (!locked) {
             throw new InventoryLockTimeoutException(productId);

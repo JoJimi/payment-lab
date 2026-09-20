@@ -1,5 +1,7 @@
 package org.example.cs_study.inventory;
 
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.example.cs_study.common.catalog.ProductNotFoundException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
@@ -21,13 +23,16 @@ class OptimisticLockStockDeductor implements StockDeductor {
 
     private final InventoryRepository inventoryRepository;
     private final TransactionTemplate transactionTemplate;
+    private final MeterRegistry meterRegistry;
     private final int maxRetries;
 
     OptimisticLockStockDeductor(
             InventoryRepository inventoryRepository,
             PlatformTransactionManager transactionManager,
+            MeterRegistry meterRegistry,
             @Value("${inventory.optimistic-lock.max-retries:3}") int maxRetries) {
         this.inventoryRepository = inventoryRepository;
+        this.meterRegistry = meterRegistry;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         // REQUIRES_NEW: OrderService처럼 이미 트랜잭션 안에서 호출되더라도 재시도마다 반드시
         // 새 트랜잭션에서 최신 버전을 다시 읽어야 한다. REQUIRED로 두면 바깥 트랜잭션에 그냥
@@ -43,17 +48,23 @@ class OptimisticLockStockDeductor implements StockDeductor {
 
     @Override
     public void deduct(Long productId, int quantity) {
-        int attempt = 0;
-        while (true) {
-            try {
-                deductOnce(productId, quantity);
-                return;
-            } catch (ObjectOptimisticLockingFailureException e) {
-                attempt++;
-                if (attempt >= maxRetries) {
-                    throw e;
+        // 1.19: 낙관적 락에는 "대기"가 없으니 재시도를 포함한 전체 소요 시간을 경합 비용으로 본다.
+        Timer.Sample sample = Timer.start(meterRegistry);
+        try {
+            int attempt = 0;
+            while (true) {
+                try {
+                    deductOnce(productId, quantity);
+                    return;
+                } catch (ObjectOptimisticLockingFailureException e) {
+                    attempt++;
+                    if (attempt >= maxRetries) {
+                        throw e;
+                    }
                 }
             }
+        } finally {
+            sample.stop(meterRegistry.timer("inventory.lock.wait", "strategy", "OPTIMISTIC"));
         }
     }
 

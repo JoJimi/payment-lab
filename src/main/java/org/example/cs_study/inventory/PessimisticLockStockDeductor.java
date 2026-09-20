@@ -1,5 +1,7 @@
 package org.example.cs_study.inventory;
 
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.example.cs_study.common.catalog.ProductNotFoundException;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
@@ -13,9 +15,11 @@ import org.springframework.transaction.annotation.Transactional;
 class PessimisticLockStockDeductor implements StockDeductor {
 
     private final InventoryRepository inventoryRepository;
+    private final MeterRegistry meterRegistry;
 
-    PessimisticLockStockDeductor(InventoryRepository inventoryRepository) {
+    PessimisticLockStockDeductor(InventoryRepository inventoryRepository, MeterRegistry meterRegistry) {
         this.inventoryRepository = inventoryRepository;
+        this.meterRegistry = meterRegistry;
     }
 
     @Override
@@ -26,8 +30,11 @@ class PessimisticLockStockDeductor implements StockDeductor {
     @Override
     @Transactional
     public void deduct(Long productId, int quantity) {
+        // 1.19: 이 조회 자체가 행 락을 기다리는 지점이다 — 경합 중이면 여기서 블로킹된다.
+        Timer.Sample sample = Timer.start(meterRegistry);
         Inventory inventory =
                 inventoryRepository.findByProductIdForUpdate(productId).orElseThrow(() -> new ProductNotFoundException(productId));
+        sample.stop(meterRegistry.timer("inventory.lock.wait", "strategy", "PESSIMISTIC"));
         inventory.deduct(quantity);
     }
 }

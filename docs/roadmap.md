@@ -581,11 +581,16 @@ public void createOrder(...) {
 
 | 프로파일 | 구성 | 예상 사용량 |
 |---|---|---|
-| `base` (1단계) | PostgreSQL, Redis, 앱 1개 | ~4GB |
+| `base` (1단계) | PostgreSQL, Redis, Prometheus, Grafana, 앱 1개, Mock PG 1개 | ~5GB |
 | `saga` (2단계) | + Kafka(KRaft 단일), PG 2인스턴스, 앱 4개 | ~9GB |
-| `perf` (3단계) | saga + Prometheus, Grafana, k6, Mock PG | ~11GB |
+| `perf` (3단계) | saga + k6 (Prometheus/Grafana는 1단계부터 이미 켜져 있음) | ~11GB |
 | `elk` (4단계) | base + Kafka + ES(힙 2GB) + Kibana + 앱 4개<br>**Prometheus/Grafana는 내림** | ~12GB |
 | `k8s` (5단계) | 호스트에 미들웨어, k3d에 앱만<br>**ES/Kibana는 내림** | ~12GB |
+
+> 1.18에서 Prometheus/Grafana를 1단계로 앞당겼습니다. 원래 이 표는 `perf`(3단계)부터
+> 관측 스택을 켜는 것으로 그려져 있었지만, 1단계 완료 기준 자체가 "Grafana에서 TPS/p95를
+> 실시간으로 볼 수 있음"이라 관측 스택 없이는 1단계를 끝낼 수 없습니다. 메모리 여유가
+> 없다면 측정할 때만 `docker-compose.observability.yml`을 올렸다 내리세요.
 
 compose 파일을 프로파일별로 쪼개고(`docker-compose.base.yml`, `.kafka.yml`, `.observability.yml`, `.elk.yml`) `-f` 조합으로 켜고 끄세요.
 
