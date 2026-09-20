@@ -31,6 +31,10 @@ public class IdempotencyRecord {
     @Column(name = "idempotency_key", nullable = false, unique = true)
     private String idempotencyKey;
 
+    /** SHA-256(hex) — 같은 키로 다른 요청 본문이 들어오면 재현하지 않고 409로 거부하기 위함. */
+    @Column(name = "request_fingerprint", nullable = false, length = 64)
+    private String requestFingerprint;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
     private IdempotencyStatus status;
@@ -48,8 +52,9 @@ public class IdempotencyRecord {
     @Column(name = "expires_at", nullable = false)
     private Instant expiresAt;
 
-    public IdempotencyRecord(String idempotencyKey, Duration ttl) {
+    public IdempotencyRecord(String idempotencyKey, Duration ttl, String requestFingerprint) {
         this.idempotencyKey = idempotencyKey;
+        this.requestFingerprint = requestFingerprint;
         this.status = IdempotencyStatus.IN_PROGRESS;
         this.createdAt = Instant.now();
         this.expiresAt = this.createdAt.plus(ttl);
@@ -59,5 +64,9 @@ public class IdempotencyRecord {
         this.status = IdempotencyStatus.COMPLETED;
         this.responseStatus = responseStatus;
         this.responseBody = responseBody;
+    }
+
+    public boolean matchesFingerprint(String otherFingerprint) {
+        return requestFingerprint.equals(otherFingerprint);
     }
 }

@@ -3,6 +3,7 @@ package org.example.cs_study.common;
 import java.util.Map;
 import org.example.cs_study.common.catalog.ProductNotFoundException;
 import org.example.cs_study.common.idempotency.IdempotencyInProgressException;
+import org.example.cs_study.common.idempotency.IdempotencyKeyConflictException;
 import org.example.cs_study.common.inventory.InsufficientStockException;
 import org.example.cs_study.inventory.InventoryLockTimeoutException;
 import org.example.cs_study.order.OrderNotFoundException;
@@ -21,7 +22,12 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", e.getMessage()));
     }
 
-    @ExceptionHandler({IdempotencyInProgressException.class, InsufficientStockException.class, PaymentOrderMismatchException.class})
+    @ExceptionHandler({
+        IdempotencyInProgressException.class,
+        IdempotencyKeyConflictException.class,
+        InsufficientStockException.class,
+        PaymentOrderMismatchException.class
+    })
     public ResponseEntity<Map<String, String>> handleConflict(RuntimeException e) {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of("error", e.getMessage()));
     }

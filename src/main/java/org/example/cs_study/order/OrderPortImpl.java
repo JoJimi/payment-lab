@@ -18,7 +18,12 @@ class OrderPortImpl implements OrderPort {
     @Transactional(readOnly = true)
     public OrderView findOrder(Long orderId) {
         Order order = orderRepository.findById(orderId).orElseThrow(() -> new OrderNotFoundException(orderId));
-        return new OrderView(order.getId(), order.getTotalAmount(), order.getCurrency(), order.getStatus() == OrderStatus.PAID);
+        return new OrderView(
+                order.getId(),
+                order.getTotalAmount(),
+                order.getCurrency(),
+                order.getStatus() == OrderStatus.CREATED,
+                order.getStatus() == OrderStatus.PAID);
     }
 
     @Override

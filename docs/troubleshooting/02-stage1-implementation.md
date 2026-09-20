@@ -1,10 +1,11 @@
 # 1단계(모놀리식 결제 코어) 구현 트러블슈팅
 
 1단계(1.1~1.22, [PR #36](https://github.com/JoJimi/payment-lab/pull/36))를 구현하며 실전 CI에서
-발견한 실패 3건, CodeRabbit 리뷰에서 나온 지적 16건, 그리고 그 16건을 고친 커밋이 CI에서
-새로 터뜨린 프레임워크 레벨 동시성 버그 1건을 원인·해결·영향 범위·재발 방지 순으로 기록합니다.
-전부 로컬에서 `./gradlew compileJava compileTestJava`로 컴파일을 검증했고, Docker 없이 돌아가는
-테스트(`MockPgServerTest`, `OrderStatusTest`, `PaymentStatusTest`)는 로컬에서, Testcontainers가
+발견한 실패 3건, CodeRabbit 리뷰 1차 라운드의 지적 16건, 그 16건을 고친 커밋이 CI에서 새로
+터뜨린 프레임워크 레벨 동시성 버그 1건, 그리고 2차 라운드에서 나온 지적 5건을
+원인·해결·영향 범위·재발 방지 순으로 기록합니다. 전부 로컬에서
+`./gradlew compileJava compileTestJava`로 컴파일을 검증했고, Docker 없이 돌아가는 테스트
+(`MockPgServerTest`, `OrderStatusTest`, `PaymentStatusTest`)는 로컬에서, Testcontainers가
 필요한 테스트는 GitHub Actions `build-test` 잡에서 확인했습니다.
 
 환경: Spring Boot 4.1.1 / Java 21 / Gradle 9.7.1 / PostgreSQL 16 / Redis 7 / Redisson 4.7.0
@@ -651,6 +652,188 @@ public Object around(ProceedingJoinPoint joinPoint) throws Throwable {
 
 ---
 
+## 겪은 문제 — CodeRabbit 2차 라운드 (18번 항목을 포함한 커밋 이후 재리뷰)
+
+18번 항목을 포함해 CI를 초록불로 만든 커밋을 CodeRabbit이 다시 리뷰하며 5건을 추가로 지적했다.
+전부 실제 결함으로 판단해 수정했다 — "heavy lift"로 분류된 항목도 예외를 두지 않았다.
+
+### 19. 낙관적 락 재시도 카운터가 `maxRetries`번을 못 채움 (off-by-one)
+
+**증상**
+`maxRetries=1`로 설정하면 첫 충돌에서 재시도를 한 번도 하지 않고 즉시 예외가 새어나간다.
+`maxRetries=0`도 마찬가지로 재시도가 전혀 없다.
+
+**원인**
+`OptimisticLockStockDeductor.deduct()`의 재시도 루프가 `attempt++`를 먼저 한 뒤
+`attempt >= maxRetries`를 검사했다. `maxRetries`는 "최초 시도 이후 몇 번 더 시도할지"인데,
+증가와 검사 순서가 바뀌어 있어 항상 한 번의 재시도 기회를 덜 쓰고 예외를 던졌다.
+
+**해결**
+```java
+if (attempt >= maxRetries) {
+    throw e;
+}
+attempt++;
+```
+검사를 증가보다 먼저 하도록 순서를 바꿨다 — `maxRetries=3`이면 이제 정확히 초기 시도 1회 +
+재시도 3회 = 총 4회 시도한다.
+
+**영향 범위**
+1.14(재시도 1/3/5/10 곡선) 측정값 전체 — 이 버그 상태로는 "재시도 N회"라고 라벨을 붙인 실험이
+실제로는 N-1회만 재시도해서, 곡선의 각 포인트가 의도한 것보다 한 단계씩 덜 관대한 값을 측정하고
+있었다.
+
+**재발 방지**
+"증가 후 검사" vs "검사 후 증가"는 경계값(0, 1)으로 반드시 손으로 한 번 확인한다. 이번처럼
+"당연히 맞겠지"로 넘어가기 쉬운 자리다.
+
+---
+
+### 20. `OrderView`의 `boolean paid`가 FAILED/CANCELLED 주문을 결제 가능으로 오판
+
+**증상**
+`OrderPortImpl.findOrder()`가 `status == PAID`만 `true`로 매핑하고 있었다. `validateOrder()`는
+`paid == false`면 무조건 통과시켰으므로, `FAILED`나 `CANCELLED` 상태의 주문도 결제를 계속 진행할
+수 있었다 — "PAID가 아니면 결제 가능"은 성립하지 않는 명제인데 코드가 그렇게 가정하고 있었다.
+
+**원인**
+주문 상태 4가지(CREATED/PAID/FAILED/CANCELLED) 중 "결제 가능(payable=CREATED만)"과 "이미
+결제됨(alreadyPaid=PAID만)"이라는 서로 다른 두 조건을 `boolean paid` 하나로 뭉뚱그렸다.
+
+**해결**
+`OrderView`를 `boolean paid` 대신 `boolean payable`(=CREATED), `boolean alreadyPaid`(=PAID)
+두 필드로 나눴다. `order.OrderStatus` 열거형 자체를 노출하는 방법도 있었지만(CodeRabbit의
+1차 제안), 그러면 `payment` 패키지가 `common.order.OrderView`를 통해 간접적으로
+`order.OrderStatus` 타입을 다시 알아야 해서 하위 패키지 직접 의존 금지 원칙(CLAUDE.md)이
+느슨해진다 — 그래서 의미별로 분리된 boolean 두 개를 택했다.
+```java
+if (order.alreadyPaid()) {
+    throw new PaymentOrderMismatchException("이미 결제 완료된 주문입니다: orderId=" + order.orderId());
+}
+if (!order.payable()) {
+    throw new PaymentOrderMismatchException("결제할 수 없는 상태의 주문입니다: orderId=" + order.orderId());
+}
+```
+
+**영향 범위**
+결제 요청 API 전체 — FAILED/CANCELLED 주문에 결제를 다시 붙일 수 있었던 심각한 결함(CodeRabbit이
+🔴 Critical로 분류).
+
+**재발 방지**
+다치(多値) 상태를 boolean 하나로 압축할 때는 "false가 의미하는 모든 경우"를 나열해보고 그중
+잘못 포함된 상태가 없는지 확인한다.
+
+---
+
+### 21. 서로 다른 멱등 키로 같은 주문에 동시 결제 — TOCTOU
+
+**증상**
+`PaymentService.validateOrder()`는 읽기 시점 검사다. 서로 다른 멱등키를 쓴 두 요청이 동시에
+같은 주문을 조회하면 둘 다 "결제 가능"으로 통과해 각자 PG를 호출할 수 있었다 —
+멱등성 방어(같은 키의 중복 요청)는 있었지만, "같은 주문에 대한 서로 다른 키의 동시 결제"는
+막는 장치가 없었다.
+
+**원인**
+주문을 "선점"하는 원자적 단계 없이, 읽기(주문 조회) → 쓰기(결제 저장)가 별도 스텝으로 분리돼
+있어 그 사이에 경쟁이 들어갈 수 있었다(Time-Of-Check to Time-Of-Use).
+
+**해결**
+멱등성 2단 방어와 같은 패턴(부록 A-1: 애플리케이션 체크 + DB unique 제약)을 여기도 적용했다.
+`payments(order_id)`에 "활성 상태(PENDING/APPROVED/UNKNOWN)"에 한정한 부분 유니크 인덱스를
+추가하고, 그 제약 위반을 도메인 예외로 번역한다.
+```sql
+CREATE UNIQUE INDEX ux_payments_active_order ON payments (order_id)
+    WHERE status IN ('PENDING', 'APPROVED', 'UNKNOWN');
+```
+```java
+try {
+    return transactionTemplate.execute(status -> {
+        Payment payment = new Payment(...);
+        paymentRepository.saveAndFlush(payment); // 즉시 flush해야 여기서 위반이 드러난다
+        return payment.getId();
+    });
+} catch (DataIntegrityViolationException e) {
+    throw new PaymentOrderMismatchException("이미 처리 중이거나 완료된 결제가 있는 주문입니다: orderId=" + request.orderId());
+}
+```
+FAILED/CANCELLED는 종결 상태라 인덱스 조건에서 제외했다 — 실패한 결제 이후 같은 주문으로 다시
+결제를 시도하는 정상 흐름을 막지 않기 위해서다.
+
+**영향 범위**
+결제 요청 API 전체 — 이 방어가 없으면 한 주문에 결제가 두 번 승인될 수 있었다(가장 치명적인
+유형의 결제 버그).
+
+**재발 방지**
+"동시에 두 요청이 같은 자원을 먼저 차지하려 competing한다"는 패턴을 발견하면, 애플리케이션
+레벨 읽기 검사만으로는 항상 TOCTOU 틈이 남는다고 가정하고 DB 제약(유니크 인덱스,
+`SELECT ... FOR UPDATE` 등) 같은 원자적 방어를 반드시 같이 놓는다.
+
+---
+
+### 22. 멱등 키를 재사용하면서 요청 본문을 바꿔도 그대로 재현됨
+
+**증상**
+동일한 멱등 키로 `orderId`, `amount`, `currency`를 바꿔서 다시 요청해도
+`IdempotencyAspect`는 키만 보고 이전 응답을 그대로 재현했다 — `PaymentService`의 검증 로직
+자체를 다시 타지 않는다.
+
+**원인**
+2단 방어(Redis SETNX + DB unique 제약)는 "같은 키의 중복 요청"만 막도록 설계돼 있었고, "같은
+키인데 본문이 다른 요청"은 애초에 고려 대상이 아니었다.
+
+**해결**
+최초 요청의 메서드 인자를 SHA-256으로 해시한 지문(fingerprint)을 `idempotency_keys` 테이블에
+같이 저장하고, 같은 키가 재사용될 때(진행 중 대기 경로 포함) 지문을 비교해서 다르면
+`IdempotencyKeyConflictException`(409)으로 거부한다.
+```sql
+ALTER TABLE idempotency_keys ADD COLUMN request_fingerprint VARCHAR(64) NOT NULL;
+```
+Redis 캐시 값에도 지문을 같이 실어서(`COMPLETED:<64자 지문><json>`), Redis 캐시 히트 경로도
+DB 폴링 경로와 동일하게 지문을 검증하게 했다 — 안 그러면 Redis가 이미 완료 응답을 캐시해둔
+순간에는 지문 검증 없이 그대로 재현되는 구멍이 남는다.
+
+**영향 범위**
+멱등성 2단 방어 전체 — 클라이언트가 실수로(또는 악의적으로) 같은 멱등 키를 다른 주문/금액에
+재사용해도 걸러지지 않던 결함.
+
+**재발 방지**
+멱등 키 설계 시 "같은 키 = 같은 요청"이라는 전제를 코드가 실제로 강제하는지 확인한다 — 키만
+보고 신뢰하면 이런 종류의 재사용 공격/실수를 막을 수 없다.
+
+---
+
+### 23. 벤치마크 스크립트가 `wait_for_app_ready` 타임아웃 시 백그라운드 프로세스를 못 지움
+
+**증상**
+`set -euo pipefail` 아래에서 `wait_for_app_ready`가 타임아웃으로 실패(`exit 1`)하면 스크립트가
+그 즉시 종료돼, 뒤에 있던 `kill "${APP_PID}"`에 도달하지 못하고 `bootRun` 프로세스가 백그라운드에
+남는다.
+
+**원인**
+정리(cleanup) 로직이 정상 흐름의 마지막에만 있고, 조기 종료 경로(`set -e`로 인한 즉시 exit)에는
+없었다.
+
+**해결**
+`APP_PID`를 할당한 직후 `EXIT` 트랩을 등록해서, 어떤 경로로 스크립트가 끝나든 프로세스 정리가
+보장되게 했다.
+```bash
+APP_PID=$!
+trap 'kill "${APP_PID}" 2>/dev/null || true' EXIT
+wait_for_app_ready
+```
+`scripts/benchmark-lock-strategies.sh`, `scripts/benchmark-optimistic-retries.sh` 둘 다 동일하게
+적용.
+
+**영향 범위**
+로컬에서 벤치마크 스크립트를 반복 실행할 때의 프로세스 누수 — 타임아웃이 나면 죽은 줄 알았던
+`bootRun`이 계속 포트를 붙들고 있어 다음 실행이 포트 충돌로 실패할 수 있었다.
+
+**재발 방지**
+`set -e` 스크립트에서 백그라운드 프로세스를 띄우면 PID를 할당한 직후 바로 `trap ... EXIT`를
+등록하는 걸 기본 패턴으로 삼는다 — 정상 종료 시의 명시적 `kill`과 트랩은 중복돼도 무해하다.
+
+---
+
 ## 요약
 
 | # | 분류 | 파일 | 한 줄 요약 |
@@ -673,3 +856,8 @@ public Object around(ProceedingJoinPoint joinPoint) throws Throwable {
 | 16 | 리뷰 | `PaymentService.java` | PG 호출을 트랜잭션 밖으로 분리 |
 | 17 | 리뷰 | `PaymentService.java` + `common.order.*` | 주문 검증 + 승인 시 `markPaid()` 연결 |
 | 18 | CI 재실패 | `IdempotencyAspect.java` | 애노테이션 바인딩 포인트컷의 AspectJ 동시성 버그 → 바인딩 없는 형태로 전환 |
+| 19 | 리뷰(2차) | `OptimisticLockStockDeductor.java` | 재시도 카운터 off-by-one → 검사를 증가보다 먼저 |
+| 20 | 리뷰(2차) | `OrderView.java`/`OrderPortImpl.java`/`PaymentService.java` | `boolean paid` → `payable`+`alreadyPaid`로 분리 (FAILED/CANCELLED 오판 수정) |
+| 21 | 리뷰(2차) | `V2__domain_schema.sql`/`PaymentService.java` | 주문별 활성 결제 부분 유니크 인덱스로 TOCTOU 차단 |
+| 22 | 리뷰(2차) | `IdempotencyAspect.java`/`IdempotencyRecord.java` | 멱등 키 재사용 시 요청 본문 지문(SHA-256) 검증 |
+| 23 | 리뷰(2차) | 벤치마크 스크립트 2개 | `wait_for_app_ready` 타임아웃 시에도 `APP_PID` 정리 (EXIT 트랩) |

@@ -5,6 +5,7 @@ import java.math.BigDecimal;
 import org.example.cs_study.common.idempotency.Idempotent;
 import org.example.cs_study.common.order.OrderPort;
 import org.example.cs_study.common.order.OrderView;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
@@ -61,8 +62,13 @@ public class PaymentService {
     }
 
     private void validateOrder(OrderView order, RequestPaymentRequest request) {
-        if (order.paid()) {
+        if (order.alreadyPaid()) {
             throw new PaymentOrderMismatchException("이미 결제 완료된 주문입니다: orderId=" + order.orderId());
+        }
+        if (!order.payable()) {
+            // CREATED가 아닌 나머지(FAILED/CANCELLED) — alreadyPaid도 아니므로 여기서 걸러야
+            // 실패/취소된 주문에 새 결제를 붙이는 걸 막는다. "PAID가 아니면 결제 가능"은 오판이다.
+            throw new PaymentOrderMismatchException("결제할 수 없는 상태의 주문입니다: orderId=" + order.orderId());
         }
         if (bigDecimalNotEqual(order.totalAmount(), request.amount())) {
             throw new PaymentOrderMismatchException(
@@ -81,11 +87,20 @@ public class PaymentService {
     }
 
     private Long savePending(String idempotencyKey, RequestPaymentRequest request) {
-        return transactionTemplate.execute(status -> {
-            Payment payment = new Payment(request.orderId(), idempotencyKey, request.amount(), request.currency());
-            paymentRepository.save(payment);
-            return payment.getId();
-        });
+        try {
+            return transactionTemplate.execute(status -> {
+                Payment payment = new Payment(request.orderId(), idempotencyKey, request.amount(), request.currency());
+                // saveAndFlush로 즉시 INSERT해야 ux_payments_active_order 위반이 여기서 바로
+                // 드러난다 — save()만 쓰면 트랜잭션 커밋 시점까지 미뤄져 예외가 이 try 밖에서 난다.
+                paymentRepository.saveAndFlush(payment);
+                return payment.getId();
+            });
+        } catch (DataIntegrityViolationException e) {
+            // validateOrder()의 읽기 시점 검사(order.payable())는 TOCTOU에 취약하다 — 서로 다른
+            // 멱등키를 쓴 두 요청이 동시에 통과할 수 있다. ux_payments_active_order 유니크
+            // 인덱스가 진짜 방어선이고, 여기서 그 위반을 도메인 예외로 번역한다.
+            throw new PaymentOrderMismatchException("이미 처리 중이거나 완료된 결제가 있는 주문입니다: orderId=" + request.orderId());
+        }
     }
 
     private PaymentResponse applyResult(Long paymentId, Long orderId, MockPgResult result) {

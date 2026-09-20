@@ -62,10 +62,13 @@ class OptimisticLockStockDeductor implements StockDeductor {
                     deductOnce(productId, quantity);
                     return;
                 } catch (ObjectOptimisticLockingFailureException e) {
-                    attempt++;
+                    // maxRetries는 "최초 시도 이후 재시도 횟수"다. 증가를 검사 뒤로 옮겨야
+                    // maxRetries번 재시도(= 총 maxRetries+1회 시도)한다 — 앞뒤가 바뀌면
+                    // maxRetries=1일 때 재시도를 한 번도 못 하고 즉시 예외가 새어나간다.
                     if (attempt >= maxRetries) {
                         throw e;
                     }
+                    attempt++;
                 }
             }
         } finally {

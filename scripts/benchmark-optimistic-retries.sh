@@ -34,6 +34,9 @@ for RETRIES in "${RETRY_COUNTS[@]}"; do
   sleep 2
   ./gradlew bootRun --args="--inventory.lock-strategy=OPTIMISTIC --inventory.optimistic-lock.max-retries=${RETRIES}" &
   APP_PID=$!
+  # set -e라 wait_for_app_ready가 타임아웃(exit 1)하면 아래 kill에 못 미치고 스크립트가
+  # 곧장 끝난다 — bootRun 프로세스가 백그라운드에 남는 걸 막기 위해 EXIT 트랩으로 대비한다.
+  trap 'kill "${APP_PID}" 2>/dev/null || true' EXIT
   wait_for_app_ready
 
   k6 run \

@@ -1,8 +1,12 @@
 package org.example.cs_study.common.idempotency;
 
 import io.micrometer.core.instrument.MeterRegistry;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.HexFormat;
 import java.util.Optional;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
@@ -55,6 +59,12 @@ import tools.jackson.databind.ObjectMapper;
  * (같은 증상 보고: resilience4j/resilience4j#919). 그래서 포인트컷은
  * {@code @annotation(FQCN)} 형태(바인딩 없음)로 쓰고, {@link Idempotent}는 어드바이스
  * 안에서 리플렉션으로 직접 읽는다 — 이러면 AspectJ의 파라미터 바인딩 경로 자체를 타지 않는다.
+ *
+ * <p><b>요청 본문 지문(fingerprint):</b> 같은 멱등 키로 다른 요청 본문(예: 다른 주문/금액)이
+ * 들어와도 키만 보고 원본 응답을 그대로 재현해버리면 안 된다. 그래서 최초 요청의 메서드 인자를
+ * SHA-256으로 해시한 지문을 DB(및 Redis 캐시 값)에 같이 저장해두고, 같은 키가 재사용될
+ * 때마다(진행 중 대기 경로 포함) 지문을 비교한다 — 다르면 재현하지 않고
+ * {@link IdempotencyKeyConflictException}(409)으로 거부한다.
  */
 @Aspect
 @Component
@@ -63,6 +73,7 @@ public class IdempotencyAspect {
 
     private static final String REDIS_KEY_PREFIX = "idempotency:";
     private static final String COMPLETED_PREFIX = "COMPLETED:";
+    private static final int FINGERPRINT_LENGTH = 64; // SHA-256 hex 문자열 길이 — 항상 고정이라 구분자 없이 자를 수 있다.
     private static final Duration DB_TTL = Duration.ofHours(24); // CLAUDE.md: DB 레코드는 길게(24시간)
     private static final Duration POLL_INTERVAL = Duration.ofMillis(50);
     private static final Duration MAX_WAIT = Duration.ofSeconds(5);
@@ -93,6 +104,7 @@ public class IdempotencyAspect {
         String redisKey = REDIS_KEY_PREFIX + key;
         Class<?> returnType = signature.getReturnType();
         Duration redisTtl = Duration.ofSeconds(idempotent.ttlSeconds());
+        String fingerprint = computeFingerprint(joinPoint);
 
         boolean redisAvailable = true;
         Boolean acquired = null;
@@ -103,26 +115,26 @@ public class IdempotencyAspect {
         }
 
         if (redisAvailable && Boolean.FALSE.equals(acquired)) {
-            return waitForResult(key, redisKey, returnType, true);
+            return waitForResult(key, redisKey, returnType, true, fingerprint);
         }
 
         Optional<IdempotencyRecord> existing = purgeIfExpired(repository.findByIdempotencyKey(key));
         if (existing.isPresent()) {
-            return replayOrWait(existing.get(), key, redisKey, returnType, redisAvailable);
+            return replayOrWait(existing.get(), key, redisKey, returnType, redisAvailable, fingerprint);
         }
 
         IdempotencyRecord record;
         try {
-            record = repository.saveAndFlush(new IdempotencyRecord(key, DB_TTL));
+            record = repository.saveAndFlush(new IdempotencyRecord(key, DB_TTL, fingerprint));
         } catch (DataIntegrityViolationException e) {
             // 다른 요청이 DB unique 제약을 먼저 통과했다 (Redis가 놓쳤거나 애초에 다운된 경우).
             Optional<IdempotencyRecord> winner = purgeIfExpired(repository.findByIdempotencyKey(key));
             if (winner.isEmpty()) {
                 // 우승자의 레코드가 이미 만료돼 있었다(24시간 지난 COMPLETED) — 방금 지웠으니
                 // 이 스레드가 새로 만든다. unique 제약은 이제 이 스레드의 INSERT를 막지 않는다.
-                record = repository.saveAndFlush(new IdempotencyRecord(key, DB_TTL));
+                record = repository.saveAndFlush(new IdempotencyRecord(key, DB_TTL, fingerprint));
             } else {
-                return replayOrWait(winner.get(), key, redisKey, returnType, redisAvailable);
+                return replayOrWait(winner.get(), key, redisKey, returnType, redisAvailable, fingerprint);
             }
         }
 
@@ -131,13 +143,26 @@ public class IdempotencyAspect {
             String json = objectMapper.writeValueAsString(result);
             record.complete(200, json);
             repository.save(record);
-            trySetRedis(redisAvailable, redisKey, COMPLETED_PREFIX + json, redisTtl);
+            trySetRedis(redisAvailable, redisKey, COMPLETED_PREFIX + fingerprint + json, redisTtl);
             meterRegistry.counter("idempotency.requests", "result", "miss").increment(); // 1.19: 최초 실행(캐시 미스)
             return result;
         } catch (Throwable ex) {
             repository.delete(record);
             tryDeleteRedis(redisAvailable, redisKey);
             throw ex;
+        }
+    }
+
+    /** 메서드 인자 전체를 SHA-256으로 해시한 hex 문자열. 같은 키의 재사용 여부를 판별하는 지문. */
+    private String computeFingerprint(ProceedingJoinPoint joinPoint) {
+        String json = objectMapper.writeValueAsString(joinPoint.getArgs());
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(json.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(hash);
+        } catch (NoSuchAlgorithmException e) {
+            // 모든 JDK가 기본으로 제공하는 알고리즘이다 — 실질적으로 도달하지 않는다.
+            throw new IllegalStateException("SHA-256 MessageDigest를 사용할 수 없습니다", e);
         }
     }
 
@@ -155,33 +180,52 @@ public class IdempotencyAspect {
     }
 
     private Object replayOrWait(
-            IdempotencyRecord record, String key, String redisKey, Class<?> returnType, boolean redisAvailable) {
+            IdempotencyRecord record,
+            String key,
+            String redisKey,
+            Class<?> returnType,
+            boolean redisAvailable,
+            String fingerprint) {
+        if (!record.matchesFingerprint(fingerprint)) {
+            throw new IdempotencyKeyConflictException(key);
+        }
         if (record.getStatus() == IdempotencyStatus.COMPLETED) {
             return deserialize(record.getResponseBody(), returnType);
         }
-        return waitForResult(key, redisKey, returnType, redisAvailable);
+        return waitForResult(key, redisKey, returnType, redisAvailable, fingerprint);
     }
 
     /**
      * IN_PROGRESS인 다른 요청이 끝날 때까지 짧게 폴링한다 (1.8: "IN_PROGRESS → 대기").
      * Redis가 가능하면 먼저 확인하는 빠른 경로로 쓰고, 아니면(또는 폴링 도중 죽으면) DB만 본다.
+     * 두 경로 모두 저장된 지문과 이번 요청의 지문이 다르면 대기를 끝내고 즉시 충돌로 거부한다.
      */
-    private Object waitForResult(String key, String redisKey, Class<?> returnType, boolean redisAvailable) {
+    private Object waitForResult(String key, String redisKey, Class<?> returnType, boolean redisAvailable, String fingerprint) {
         Instant deadline = Instant.now().plus(MAX_WAIT);
         while (Instant.now().isBefore(deadline)) {
             if (redisAvailable) {
                 try {
                     String value = redisTemplate.opsForValue().get(redisKey);
                     if (value != null && value.startsWith(COMPLETED_PREFIX)) {
-                        return deserialize(value.substring(COMPLETED_PREFIX.length()), returnType);
+                        String remainder = value.substring(COMPLETED_PREFIX.length());
+                        String cachedFingerprint = remainder.substring(0, FINGERPRINT_LENGTH);
+                        if (!cachedFingerprint.equals(fingerprint)) {
+                            throw new IdempotencyKeyConflictException(key);
+                        }
+                        return deserialize(remainder.substring(FINGERPRINT_LENGTH), returnType);
                     }
                 } catch (DataAccessException e) {
                     redisAvailable = false;
                 }
             }
             Optional<IdempotencyRecord> record = repository.findByIdempotencyKey(key);
-            if (record.isPresent() && record.get().getStatus() == IdempotencyStatus.COMPLETED && !isExpired(record.get())) {
-                return deserialize(record.get().getResponseBody(), returnType);
+            if (record.isPresent()) {
+                if (!record.get().matchesFingerprint(fingerprint)) {
+                    throw new IdempotencyKeyConflictException(key);
+                }
+                if (record.get().getStatus() == IdempotencyStatus.COMPLETED && !isExpired(record.get())) {
+                    return deserialize(record.get().getResponseBody(), returnType);
+                }
             }
             sleep();
         }
