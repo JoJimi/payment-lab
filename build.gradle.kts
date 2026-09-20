@@ -126,4 +126,26 @@ dependencies {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+    // 기본 콘솔 출력은 예외 타입+위치만 보여주고 메시지/전체 스택트레이스를 생략한다.
+    // CI 로그만으로 원인을 진단할 수 있어야 하므로(로컬 재현이 항상 가능한 건 아님) 켜둔다.
+    testLogging {
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        showStackTraces = true
+        showCauses = true
+        events("failed")
+    }
+}
+
+// @Idempotent(key = "#idempotencyKey") 같은 SpEL이 파라미터 이름을 리플렉션으로 읽어야 하므로 필요.
+tasks.withType<JavaCompile> {
+    options.compilerArgs.add("-parameters")
+}
+
+// 1.5: Mock PG를 별도 프로세스로 기동. 메인 앱(bootRun)과 동시에 띄워야 한다.
+// 포트를 바꾸려면: ./gradlew mockPgRun --args="8091"
+tasks.register<JavaExec>("mockPgRun") {
+    group = "application"
+    description = "Mock PG 서버를 별도 프로세스로 기동한다 (기본 포트 8090)"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("org.example.cs_study.mockpg.MockPgServer")
 }

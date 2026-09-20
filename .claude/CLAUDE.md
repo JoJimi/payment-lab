@@ -34,6 +34,7 @@
 ./gradlew bootRun                  # dev 프로파일
 
 docker compose -f docker-compose.yml up -d    # 0~1단계 (PostgreSQL + Redis)
+docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d  # + Prometheus/Grafana (1.18)
 
 # 의존성 좌표 검증 (Boot 4 작업 시 필수)
 ./gradlew dependencies --configuration runtimeClasspath
@@ -160,9 +161,10 @@ org.example.cs_study
 
 | 단계 | 명령 |
 |---|---|
-| 0–1 | `docker compose -f docker-compose.yml up -d` |
+| 0 | `docker compose -f docker-compose.yml up -d` |
+| 1 | `+ docker-compose.observability.yml` (Prometheus/Grafana, 1.18 — 측정할 때만 올려도 됨) |
 | 2 | `+ docker-compose.kafka.yml` |
-| 3 | `+ docker-compose.observability.yml` |
+| 3 | (1단계부터 켜진 observability 그대로 사용, 추가 없음) |
 | 4 | `+ docker-compose.elk.yml` (Prometheus/Grafana는 내림) |
 
 새 미들웨어를 추가할 때는 힙 상한을 반드시 지정하세요 (ES `-Xms1g -Xmx1g`, Kafka 512MB).

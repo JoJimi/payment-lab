@@ -1,0 +1,12 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    # 대시보드 JSON(payment-lab-overview.json)의 모든 패널이 uid "Prometheus"를 직접 참조한다.
+    # uid를 안 주면 Grafana가 임의 uid를 생성해 패널이 "Datasource not found"로 비어 보인다.
+    uid: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

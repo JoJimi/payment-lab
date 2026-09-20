@@ -1,0 +1,35 @@
+# 1.18 — 부록 B `perf` 프로파일용 추가 구성. 기본 `docker-compose.yml`(Postgres/Redis)과
+# 함께 켠다: docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+#
+# 앱과 Mock PG는 컨테이너 밖(호스트)에서 ./gradlew bootRun / mockPgRun으로 띄운다 —
+# Prometheus가 host.docker.internal로 스크레이프한다.
+services:
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    container_name: payment-lab-prometheus
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # Linux에서도 host.docker.internal 사용
+    mem_limit: 512m
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: payment-lab-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      # 익명 Viewer 접근(GF_AUTH_ANONYMOUS_ENABLED)과 달리 admin 비밀번호는 YAML에 평문으로
+      # 두지 않는다 — 로컬 전용이어도 자격 증명 하드코딩 습관을 들이지 않기 위함.
+      # .env에 GRAFANA_ADMIN_PASSWORD를 넣거나 셸에서 export하고 기동할 것.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_AUTH_ANONYMOUS_ENABLED: "true" # 로컬 학습용. 운영이라면 절대 켜지 않을 설정.
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    mem_limit: 256m
