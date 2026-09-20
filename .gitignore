@@ -43,3 +43,4 @@ logs/
 *.local.yml
 *.sarif
 .trivy/
+.claude/
