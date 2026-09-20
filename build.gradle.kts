@@ -127,3 +127,12 @@ dependencies {
 tasks.withType<Test> {
     useJUnitPlatform()
 }
+
+// 1.5: Mock PG를 별도 프로세스로 기동. 메인 앱(bootRun)과 동시에 띄워야 한다.
+// 포트를 바꾸려면: ./gradlew mockPgRun --args="8091"
+tasks.register<JavaExec>("mockPgRun") {
+    group = "application"
+    description = "Mock PG 서버를 별도 프로세스로 기동한다 (기본 포트 8090)"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("org.example.cs_study.mockpg.MockPgServer")
+}
