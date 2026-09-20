@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.math.BigDecimal;
+import org.example.cs_study.common.exception.InvalidStateTransitionException;
+import org.example.cs_study.payment.domain.Payment;
+import org.example.cs_study.payment.domain.PaymentStatus;
 import org.junit.jupiter.api.Test;
 
 /** docs/domain/state-transitions.md 표를 그대로 코드로 옮겼는지 검증. Docker 불필요. */
@@ -51,6 +54,6 @@ class PaymentStatusTest {
         payment.fail();
 
         assertThatThrownBy(() -> payment.approve("pg-tx-2"))
-                .isInstanceOf(org.example.cs_study.common.InvalidStateTransitionException.class);
+                .isInstanceOf(InvalidStateTransitionException.class);
     }
 }
