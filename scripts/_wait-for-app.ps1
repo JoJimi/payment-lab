@@ -46,9 +46,16 @@ function Stop-AppJava {
 
     foreach ($procId in $procIds) {
         try {
-            Wait-Process -Id $procId -Timeout 30 -ErrorAction SilentlyContinue
+            # -ErrorAction Stop을 줘야 타임아웃이 terminating error가 돼 catch가 실제로 잡는다
+            # (SilentlyContinue는 cmdlet 레벨에서 조용히 삼켜서 타임아웃 자체를 감지 못하게 만든다 — CodeRabbit 지적).
+            Wait-Process -Id $procId -Timeout 30 -ErrorAction Stop
         } catch {
-            # 이미 종료된 프로세스에 대한 Wait-Process 오류는 무시
+            if (Get-Process -Id $procId -ErrorAction SilentlyContinue) {
+                # 30초 내에 실제로 종료되지 않음 — 포트가 계속 점유돼 있을 수 있으므로 조용히 넘기지 않는다.
+                throw "PID ${procId} 프로세스가 30초 내에 종료되지 않았습니다 — 포트가 계속 점유돼 있을 수 있습니다."
+            }
+            # Get-Process에서 안 잡히면 이미 종료된 것 — Wait-Process가 그 사이 타이밍에 걸려 던진
+            # 오류이므로 무시해도 안전하다.
         }
     }
 }

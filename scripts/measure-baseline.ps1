@@ -24,6 +24,10 @@ function Reset-Inventory {
     Assert-LastExitCode "재고 초기화"
 }
 
+# 사용법상 bootRun을 별도 터미널에서 직접 띄우므로, k6를 쏘기 전에 실제로 UP인지 확인한다
+# (CodeRabbit 지적 — 안 그러면 앱이 아직 기동 중일 때 워밍업/첫 측정이 연결 실패로 오염될 수 있음).
+Wait-AppReady
+
 Reset-Inventory
 
 Write-Host "=== 워밍업 ==="
