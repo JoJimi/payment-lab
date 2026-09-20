@@ -56,6 +56,11 @@ spring:
         enable.idempotence: true      # acks=all 과 짝. 프로듀서 재시도 시 브로커 레벨 중복 방지
         # (컨슈머 측 중복은 2.8 processed_event 테이블로 별도 방어)
 
+# 1.5: 별도 프로세스로 기동하는 Mock PG (./gradlew mockPgRun). 3단계에서 Resilience4j 인스턴스명
+# mockPg와 맞물리므로 이름을 미리 고정해둔다.
+mockpg:
+  base-url: http://localhost:8090
+
 server:
   port: 8080
   shutdown: graceful

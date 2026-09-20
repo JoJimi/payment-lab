@@ -128,6 +128,11 @@ tasks.withType<Test> {
     useJUnitPlatform()
 }
 
+// @Idempotent(key = "#idempotencyKey") 같은 SpEL이 파라미터 이름을 리플렉션으로 읽어야 하므로 필요.
+tasks.withType<JavaCompile> {
+    options.compilerArgs.add("-parameters")
+}
+
 // 1.5: Mock PG를 별도 프로세스로 기동. 메인 앱(bootRun)과 동시에 띄워야 한다.
 // 포트를 바꾸려면: ./gradlew mockPgRun --args="8091"
 tasks.register<JavaExec>("mockPgRun") {

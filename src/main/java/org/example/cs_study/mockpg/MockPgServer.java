@@ -65,8 +65,12 @@ public final class MockPgServer {
         System.out.printf("Mock PG server listening on :%d (POST /pg/payments, GET|POST /pg/_config)%n", boundPort);
     }
 
-    /** 실제로 바인딩된 포트를 반환한다 (0을 넘기면 OS가 빈 포트를 골라준다 — 테스트용). */
-    int start(int port) throws IOException {
+    /**
+     * 실제로 바인딩된 포트를 반환한다 (0을 넘기면 OS가 빈 포트를 골라준다).
+     * public인 이유: 다른 패키지의 통합 테스트(1.9, 1.10)가 실제 Mock PG 없이도
+     * 인프로세스로 기동해 재사용할 수 있어야 하기 때문.
+     */
+    public int start(int port) throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/pg/payments", guarded(this::handlePayment));
         server.createContext("/pg/_config", guarded(this::handleConfig));
