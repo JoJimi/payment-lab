@@ -1,0 +1,252 @@
+openapi: 3.0.3
+info:
+  title: Payment Lab API
+  description: |
+    1단계(모놀리식 결제 코어) REST API 명세. 로드맵 1.4.
+    상태 전이 규칙은 docs/domain/state-transitions.md, 스키마는 docs/domain/erd.md 참고.
+  version: "1.0.0-stage1"
+
+servers:
+  - url: http://localhost:8080
+    description: 로컬 dev
+
+tags:
+  - name: orders
+  - name: payments
+
+paths:
+  /api/orders:
+    post:
+      tags: [orders]
+      summary: 주문 생성
+      description: 상품/수량으로 주문을 생성한다. 생성 직후 상태는 항상 CREATED.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+      responses:
+        '201':
+          description: 주문 생성됨
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: 존재하지 않는 상품
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/payments:
+    post:
+      tags: [payments]
+      summary: 결제 요청
+      description: |
+        멱등 키는 `Idempotency-Key` 헤더로 전달한다 (Stripe/Toss 관례).
+        같은 키로 재요청하면 새로 처리하지 않고 **원본 응답을 그대로 재현**한다
+        (409을 반환하지 않음 — 부록 A-1, "진짜 멱등의 정의").
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RequestPaymentRequest'
+      responses:
+        '200':
+          description: |
+            동일 멱등 키의 이전 처리 결과를 재현 (COMPLETED 상태였던 경우).
+            또는 동시에 처리 중인 요청이 끝나기를 기다렸다가 그 결과를 반환 (IN_PROGRESS 대기).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResponse'
+        '201':
+          description: 신규 결제 처리 완료 (최초 요청)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: 존재하지 않는 주문
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/payments/{paymentId}:
+    get:
+      tags: [payments]
+      summary: 결제 조회
+      description: |
+        `UNKNOWN` 상태가 반환될 수 있다 — PG 응답 타임아웃으로 승인 여부가 아직
+        확정되지 않은 상태다 (CLAUDE.md 코드 규칙). FAILED로 오인하지 말 것.
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+      responses:
+        '200':
+          description: 조회 성공
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/payments/{paymentId}/cancel:
+    post:
+      tags: [payments]
+      summary: 결제 취소
+      description: APPROVED 상태의 결제만 취소 가능 (docs/domain/state-transitions.md 결제 전이표).
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 취소 완료
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 취소할 수 없는 상태 (허용되지 않는 상태 전이)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        example: "9b1e1c3a-0f1a-4a4f-9c3e-2a6b1d9f6a11"
+    PaymentId:
+      name: paymentId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+
+  responses:
+    BadRequest:
+      description: 잘못된 요청
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: 리소스 없음
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    CreateOrderRequest:
+      type: object
+      required: [productId, quantity]
+      properties:
+        productId:
+          type: integer
+          format: int64
+        quantity:
+          type: integer
+          minimum: 1
+
+    OrderResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        productId:
+          type: integer
+          format: int64
+        quantity:
+          type: integer
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+        totalAmount:
+          type: string
+          description: BigDecimal 직렬화 (numeric(19,4))
+          example: "12000.0000"
+        currency:
+          type: string
+          example: "KRW"
+        createdAt:
+          type: string
+          format: date-time
+
+    OrderStatus:
+      type: string
+      enum: [CREATED, PAID, FAILED, CANCELLED]
+
+    RequestPaymentRequest:
+      type: object
+      required: [orderId, amount, currency]
+      properties:
+        orderId:
+          type: integer
+          format: int64
+        amount:
+          type: string
+          example: "12000.0000"
+        currency:
+          type: string
+          example: "KRW"
+
+    PaymentResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        orderId:
+          type: integer
+          format: int64
+        status:
+          $ref: '#/components/schemas/PaymentStatus'
+        amount:
+          type: string
+          example: "12000.0000"
+        currency:
+          type: string
+          example: "KRW"
+        pgTransactionId:
+          type: string
+          nullable: true
+        requestedAt:
+          type: string
+          format: date-time
+        approvedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    PaymentStatus:
+      type: string
+      description: UNKNOWN = PG 응답 타임아웃 (FAILED 아님, docs/domain/state-transitions.md)
+      enum: [PENDING, APPROVED, FAILED, UNKNOWN, CANCELLED]
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        message:
+          type: string
