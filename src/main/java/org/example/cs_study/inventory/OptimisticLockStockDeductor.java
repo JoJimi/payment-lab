@@ -17,6 +17,11 @@ import org.springframework.transaction.support.TransactionTemplate;
  * 트랜잭션/영속성 컨텍스트를 재사용하면 여전히 stale한 버전을 들고 있어 재시도가 무의미해진다.
  *
  * <p>재시도 횟수는 1.14 실험 대상이라 설정으로 뺐다 (기본 3회).
+ *
+ * <p><b>알려진 트레이드오프:</b> REQUIRES_NEW로 재고 차감을 독립 커밋하므로, 이 메서드가 성공한
+ * 뒤 호출자({@code OrderService.createOrder})의 나머지 로직이 실패해도 재고 차감은 롤백되지
+ * 않는다 — 주문/재고 원자성이 깨질 수 있다는 뜻이다. 상세 배경은
+ * {@code OrderService.createOrder} Javadoc 참고.
  */
 @Component
 class OptimisticLockStockDeductor implements StockDeductor {

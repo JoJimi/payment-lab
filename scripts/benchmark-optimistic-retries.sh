@@ -12,6 +12,10 @@ set -euo pipefail
 #   ./gradlew mockPgRun &
 #   ./scripts/benchmark-optimistic-retries.sh
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./_wait-for-app.sh
+source "${SCRIPT_DIR}/_wait-for-app.sh"
+
 RETRY_COUNTS=(1 3 5 10)
 PRODUCT_ID=${PRODUCT_ID:-1}
 STOCK=${STOCK:-100}
@@ -30,7 +34,7 @@ for RETRIES in "${RETRY_COUNTS[@]}"; do
   sleep 2
   ./gradlew bootRun --args="--inventory.lock-strategy=OPTIMISTIC --inventory.optimistic-lock.max-retries=${RETRIES}" &
   APP_PID=$!
-  sleep 15
+  wait_for_app_ready
 
   k6 run \
     --env VUS="${VUS}" --env DURATION="${DURATION}" --env PRODUCT_ID="${PRODUCT_ID}" \

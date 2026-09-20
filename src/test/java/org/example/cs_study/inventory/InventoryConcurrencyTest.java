@@ -145,7 +145,10 @@ class InventoryConcurrencyTest {
     }
 
     private ConcurrencyResult runConcurrently(Long productId, StockDeductor deductor) throws Exception {
-        ExecutorService pool = Executors.newFixedThreadPool(50);
+        // 풀 크기를 CONCURRENT_REQUESTS와 같게 잡는다 — 더 작으면 뒤에 밀린 태스크가 시작도
+        // 못 한 채 앞선 태스크들이 go.await()에서 블로킹돼 ready가 0에 도달하지 못하고,
+        // 실제 동시 실행 규모도 300이 아니라 풀 크기로 줄어든다.
+        ExecutorService pool = Executors.newFixedThreadPool(CONCURRENT_REQUESTS);
         CountDownLatch ready = new CountDownLatch(CONCURRENT_REQUESTS);
         CountDownLatch go = new CountDownLatch(1);
         AtomicInteger success = new AtomicInteger();
@@ -171,7 +174,7 @@ class InventoryConcurrencyTest {
                     .collect(Collectors.toList());
 
             List<Future<Void>> futures = tasks.stream().map(pool::submit).collect(Collectors.toList());
-            ready.await(5, TimeUnit.SECONDS);
+            assertThat(ready.await(10, TimeUnit.SECONDS)).as("모든 스레드가 출발선에 도달해야 함").isTrue();
             Instant start = Instant.now();
             go.countDown();
             for (Future<Void> future : futures) {

@@ -50,6 +50,7 @@ class PaymentStatusTest {
         Payment payment = new Payment(1L, "idem-key", new BigDecimal("1000.0000"), "KRW");
         payment.fail();
 
-        assertThatThrownBy(() -> payment.approve("pg-tx-2")).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> payment.approve("pg-tx-2"))
+                .isInstanceOf(org.example.cs_study.common.InvalidStateTransitionException.class);
     }
 }

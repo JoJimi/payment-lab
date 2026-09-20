@@ -1,7 +1,9 @@
 package org.example.cs_study.inventory;
 
+import java.util.List;
 import org.example.cs_study.common.catalog.ProductNotFoundException;
 import org.example.cs_study.common.inventory.InsufficientStockException;
+import org.springframework.dao.support.DataAccessUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
@@ -29,8 +31,11 @@ class NoLockStockDeductor implements StockDeductor {
 
     @Override
     public void deduct(Long productId, int quantity) {
-        Integer available = jdbcTemplate.queryForObject(
-                "SELECT available FROM inventory WHERE product_id = ?", Integer.class, productId);
+        // queryForObject는 결과가 0건이면 null이 아니라 EmptyResultDataAccessException을 던진다.
+        // 행이 없을 수 있는 조회이므로 queryForList + singleResult로 0건을 명시적으로 다룬다.
+        List<Integer> rows =
+                jdbcTemplate.queryForList("SELECT available FROM inventory WHERE product_id = ?", Integer.class, productId);
+        Integer available = DataAccessUtils.singleResult(rows);
         if (available == null) {
             throw new ProductNotFoundException(productId);
         }

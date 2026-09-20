@@ -21,7 +21,10 @@ services:
     ports:
       - "3000:3000"
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      # 익명 Viewer 접근(GF_AUTH_ANONYMOUS_ENABLED)과 달리 admin 비밀번호는 YAML에 평문으로
+      # 두지 않는다 — 로컬 전용이어도 자격 증명 하드코딩 습관을 들이지 않기 위함.
+      # .env에 GRAFANA_ADMIN_PASSWORD를 넣거나 셸에서 export하고 기동할 것.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
       GF_AUTH_ANONYMOUS_ENABLED: "true" # 로컬 학습용. 운영이라면 절대 켜지 않을 설정.
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
     volumes:

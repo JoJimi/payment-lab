@@ -14,6 +14,10 @@ set -euo pipefail
 # 실행 후 benchmarks/raw/<전략>.json의 k6 summary를 읽어
 # benchmarks/01-lock-strategies.md 표를 채운다 (워밍업 후 3회 반복, 중앙값 — CLAUDE.md).
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./_wait-for-app.sh
+source "${SCRIPT_DIR}/_wait-for-app.sh"
+
 STRATEGIES=(NONE PESSIMISTIC OPTIMISTIC DISTRIBUTED)
 PRODUCT_ID=${PRODUCT_ID:-1}
 STOCK=${STOCK:-100}
@@ -33,7 +37,7 @@ for STRATEGY in "${STRATEGIES[@]}"; do
   sleep 2
   ./gradlew bootRun --args="--inventory.lock-strategy=${STRATEGY}" &
   APP_PID=$!
-  sleep 15 # 기동 대기 (Boot 4 기준선 17~22초, 5.9 참고)
+  wait_for_app_ready
 
   k6 run \
     --env VUS="${VUS}" --env DURATION="${DURATION}" --env PRODUCT_ID="${PRODUCT_ID}" \

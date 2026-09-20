@@ -15,6 +15,7 @@ import java.time.Instant;
 import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
+import org.example.cs_study.common.InvalidStateTransitionException;
 
 /**
  * {@code productId}는 {@code inventory} 패키지 엔티티를 참조하지 않는 소프트 참조(순수 ID)다.
@@ -74,7 +75,7 @@ public class Order {
 
     private void transitionTo(OrderStatus target) {
         if (!status.canTransitionTo(target)) {
-            throw new IllegalStateException(
+            throw new InvalidStateTransitionException(
                     "주문 상태를 %s에서 %s로 전이할 수 없습니다 (orderId=%s)".formatted(status, target, id));
         }
         this.status = target;

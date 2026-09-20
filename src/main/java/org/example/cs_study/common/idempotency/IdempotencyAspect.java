@@ -12,6 +12,8 @@ import org.springframework.core.DefaultParameterNameDiscoverer;
 import org.springframework.core.ParameterNameDiscoverer;
 import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.expression.ExpressionParser;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
@@ -37,9 +39,17 @@ import tools.jackson.databind.ObjectMapper;
  * <p><b>1.10 — Redis 다운 내성:</b> Redis 호출(SETNX/GET/SET/DELETE)이 {@link DataAccessException}을
  * 던지면 1차 방어를 건너뛰고 곧바로 DB 2차 방어(unique 제약 + 폴링)로만 동작한다. Redis가
  * 죽어도 중복 승인이 나지 않아야 하고(최종 방어), 대신 Redis가 주던 "빠른 차단"만 잃는다.
+ *
+ * <p><b>어드바이스 순서:</b> {@code @Order(HIGHEST_PRECEDENCE)}로 이 애스펙트가 Spring 트랜잭션
+ * 어드바이저보다 바깥에서 실행되도록 강제한다. 명시하지 않으면 트랜잭션 어드바이저와 이 애스펙트가
+ * 둘 다 기본값({@code Ordered.LOWEST_PRECEDENCE})이라 순서가 정의되지 않는다 — 만약 트랜잭션이
+ * 바깥이 되면, {@link #around}가 {@code proceed()} 호출 전에 실행하는 {@code saveAndFlush}가
+ * 이미 열려 있는 비즈니스 트랜잭션에 합류해버려서 "짧은 트랜잭션으로 즉시 커밋"이라는 전제가
+ * 깨지고, 동시 요청이 그 커밋 전 상태를 보게 된다.
  */
 @Aspect
 @Component
+@Order(Ordered.HIGHEST_PRECEDENCE)
 public class IdempotencyAspect {
 
     private static final String REDIS_KEY_PREFIX = "idempotency:";
@@ -85,7 +95,7 @@ public class IdempotencyAspect {
             return waitForResult(key, redisKey, returnType, true);
         }
 
-        Optional<IdempotencyRecord> existing = repository.findByIdempotencyKey(key);
+        Optional<IdempotencyRecord> existing = purgeIfExpired(repository.findByIdempotencyKey(key));
         if (existing.isPresent()) {
             return replayOrWait(existing.get(), key, redisKey, returnType, redisAvailable);
         }
@@ -95,10 +105,14 @@ public class IdempotencyAspect {
             record = repository.saveAndFlush(new IdempotencyRecord(key, DB_TTL));
         } catch (DataIntegrityViolationException e) {
             // 다른 요청이 DB unique 제약을 먼저 통과했다 (Redis가 놓쳤거나 애초에 다운된 경우).
-            IdempotencyRecord winner = repository
-                    .findByIdempotencyKey(key)
-                    .orElseThrow(() -> new IllegalStateException("unique 제약 위반인데 레코드가 없습니다: " + key));
-            return replayOrWait(winner, key, redisKey, returnType, redisAvailable);
+            Optional<IdempotencyRecord> winner = purgeIfExpired(repository.findByIdempotencyKey(key));
+            if (winner.isEmpty()) {
+                // 우승자의 레코드가 이미 만료돼 있었다(24시간 지난 COMPLETED) — 방금 지웠으니
+                // 이 스레드가 새로 만든다. unique 제약은 이제 이 스레드의 INSERT를 막지 않는다.
+                record = repository.saveAndFlush(new IdempotencyRecord(key, DB_TTL));
+            } else {
+                return replayOrWait(winner.get(), key, redisKey, returnType, redisAvailable);
+            }
         }
 
         try {
@@ -114,6 +128,19 @@ public class IdempotencyAspect {
             tryDeleteRedis(redisAvailable, redisKey);
             throw ex;
         }
+    }
+
+    /** 만료된(24시간 지난) COMPLETED 레코드는 지우고 "없는 것"으로 취급한다 — 영원히 재현되면 안 된다. */
+    private Optional<IdempotencyRecord> purgeIfExpired(Optional<IdempotencyRecord> found) {
+        if (found.isPresent() && isExpired(found.get())) {
+            repository.delete(found.get());
+            return Optional.empty();
+        }
+        return found;
+    }
+
+    private static boolean isExpired(IdempotencyRecord record) {
+        return record.getStatus() == IdempotencyStatus.COMPLETED && Instant.now().isAfter(record.getExpiresAt());
     }
 
     private Object replayOrWait(
@@ -142,7 +169,7 @@ public class IdempotencyAspect {
                 }
             }
             Optional<IdempotencyRecord> record = repository.findByIdempotencyKey(key);
-            if (record.isPresent() && record.get().getStatus() == IdempotencyStatus.COMPLETED) {
+            if (record.isPresent() && record.get().getStatus() == IdempotencyStatus.COMPLETED && !isExpired(record.get())) {
                 return deserialize(record.get().getResponseBody(), returnType);
             }
             sleep();

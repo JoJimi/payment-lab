@@ -16,6 +16,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import org.example.cs_study.mockpg.MockPgServer;
+import org.example.cs_study.order.Order;
+import org.example.cs_study.order.OrderRepository;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -50,6 +53,11 @@ class PaymentIdempotencyConcurrencyTest {
         mockPgServer = new MockPgServer();
     }
 
+    @AfterAll
+    static void stopMockPg() {
+        mockPgServer.stop();
+    }
+
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) throws IOException {
         registry.add("spring.datasource.url", postgres::getJdbcUrl);
@@ -68,13 +76,24 @@ class PaymentIdempotencyConcurrencyTest {
     @Autowired
     PaymentRepository paymentRepository;
 
+    @Autowired
+    OrderRepository orderRepository;
+
     @Test
     void 동일_멱등키로_100개_동시요청해도_승인은_한_건만_나고_나머지는_동일_응답이다() throws Exception {
+        BigDecimal amount = new BigDecimal("1000.0000");
+        String currency = "KRW";
+        // PaymentService가 결제 전 주문을 조회/검증하므로(1.13 이후), 요청 금액/통화와
+        // 일치하는 주문을 미리 만들어 둬야 한다.
+        Order order = orderRepository.save(new Order(1L, 1, amount, currency));
         String idempotencyKey = UUID.randomUUID().toString();
-        RequestPaymentRequest request = new RequestPaymentRequest(1L, new BigDecimal("1000.0000"), "KRW");
+        RequestPaymentRequest request = new RequestPaymentRequest(order.getId(), amount, currency);
         int concurrency = 100;
 
-        ExecutorService pool = Executors.newFixedThreadPool(32);
+        // 풀 크기를 concurrency와 같게 잡는다 — 더 작으면 뒤에 밀린 태스크가 큐에서 시작조차
+        // 못 한 채로 앞선 태스크들이 go.await()에서 블로킹돼, ready가 0에 도달하지 못하고
+        // 매번 5초 타임아웃 후에야 진행된다(그마저도 "동시 100건"이 아니라 풀 크기만큼만 동시 실행됨).
+        ExecutorService pool = Executors.newFixedThreadPool(concurrency);
         CountDownLatch ready = new CountDownLatch(concurrency);
         CountDownLatch go = new CountDownLatch(1);
         try {
@@ -88,7 +107,7 @@ class PaymentIdempotencyConcurrencyTest {
 
             List<Future<PaymentResponse>> futures =
                     tasks.stream().map(pool::submit).collect(Collectors.toList());
-            ready.await(5, TimeUnit.SECONDS);
+            assertThat(ready.await(10, TimeUnit.SECONDS)).as("모든 스레드가 출발선에 도달해야 함").isTrue();
             go.countDown();
 
             Set<Long> paymentIds = new java.util.HashSet<>();

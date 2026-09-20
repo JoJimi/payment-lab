@@ -99,7 +99,7 @@ CI에서 실제로 잡아낸 버그 3건(로컬에서는 안 보이던 것들 �
 - 락 4종/낙관적 재시도/베이스라인 벤치마크 실측 (`benchmarks/0{1,2,3}-*.md`의 TODO) —
   `scripts/benchmark-lock-strategies.sh`, `scripts/benchmark-optimistic-retries.sh`,
   `scripts/measure-baseline.sh`
-- Grafana 대시보드 육안 확인 (`docker-compose.observability.yml` 기동 후
-  `http://localhost:3000`)
+- Grafana 대시보드 육안 확인 (`GRAFANA_ADMIN_PASSWORD` 환경변수 설정 후
+  `docker-compose.observability.yml` 기동, `http://localhost:3000` 접속)
 
 이 두 가지만 채우면 1단계가 완전히 끝난다 — 나머지 완료 기준은 전부 CI로 확정됨.

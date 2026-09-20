@@ -49,6 +49,7 @@ public final class MockPgServer {
     private final JsonMapper json = JsonMapper.builder().build();
     private final SecureRandom random = new SecureRandom();
     private final ExecutorService workers = Executors.newCachedThreadPool();
+    private volatile HttpServer server;
 
     public MockPgServer() {
         this(DEFAULT_FORCE_TIMEOUT_WAIT_MS);
@@ -71,12 +72,21 @@ public final class MockPgServer {
      * 인프로세스로 기동해 재사용할 수 있어야 하기 때문.
      */
     public int start(int port) throws IOException {
-        HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
-        server.createContext("/pg/payments", guarded(this::handlePayment));
-        server.createContext("/pg/_config", guarded(this::handleConfig));
-        server.setExecutor(workers);
-        server.start();
-        return server.getAddress().getPort();
+        HttpServer newServer = HttpServer.create(new InetSocketAddress(port), 0);
+        newServer.createContext("/pg/payments", guarded(this::handlePayment));
+        newServer.createContext("/pg/_config", guarded(this::handleConfig));
+        newServer.setExecutor(workers);
+        newServer.start();
+        this.server = newServer;
+        return newServer.getAddress().getPort();
+    }
+
+    /** 테스트 teardown에서 호출 — 소켓을 닫고 워커 스레드를 정리한다. */
+    public void stop() {
+        if (server != null) {
+            server.stop(0);
+        }
+        workers.shutdownNow();
     }
 
     private void handlePayment(HttpExchange exchange) throws IOException {

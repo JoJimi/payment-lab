@@ -22,6 +22,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -37,11 +38,17 @@ class MockPgServerTest {
     private static final JsonMapper JSON = JsonMapper.builder().build();
 
     private static int port;
+    private static MockPgServer server;
 
     @BeforeAll
     static void startServer() throws IOException {
-        MockPgServer server = new MockPgServer();
+        server = new MockPgServer();
         port = server.start(0); // OS가 빈 포트를 골라줌
+    }
+
+    @AfterAll
+    static void stopServer() {
+        server.stop();
     }
 
     @BeforeEach
@@ -142,7 +149,7 @@ class MockPgServerTest {
             // 자신의 타임아웃이 더 짧으면 이 응답을 못 받고 UNKNOWN 처리하게 된다 (3.4).
             assertThat(response.get("status")).isIn("APPROVED", "FAILED");
         } finally {
-            postJson(shortPort, "/pg/_config", Map.of("reset", true));
+            shortTimeoutServer.stop();
         }
     }
 

@@ -16,6 +16,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import org.example.cs_study.mockpg.MockPgServer;
+import org.example.cs_study.order.Order;
+import org.example.cs_study.order.OrderRepository;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -52,6 +55,11 @@ class PaymentIdempotencyRedisDownTest {
         mockPgServer = new MockPgServer();
     }
 
+    @AfterAll
+    static void stopMockPg() {
+        mockPgServer.stop();
+    }
+
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) throws IOException {
         registry.add("spring.datasource.url", postgres::getJdbcUrl);
@@ -70,15 +78,26 @@ class PaymentIdempotencyRedisDownTest {
     @Autowired
     PaymentRepository paymentRepository;
 
+    @Autowired
+    OrderRepository orderRepository;
+
     @Test
     void redis가_다운된_상태에서도_동시_중복요청은_DB_유니크_제약이_막는다() throws Exception {
+        BigDecimal amount = new BigDecimal("2000.0000");
+        String currency = "KRW";
+        // PaymentService가 결제 전 주문을 조회/검증하므로(1.13 이후), 요청 금액/통화와
+        // 일치하는 주문을 미리 만들어 둬야 한다.
+        Order order = orderRepository.save(new Order(1L, 1, amount, currency));
+
         redis.stop(); // 1차 방어 완전 제거. 이후 모든 Redis 호출은 DataAccessException.
 
         String idempotencyKey = UUID.randomUUID().toString();
-        RequestPaymentRequest request = new RequestPaymentRequest(1L, new BigDecimal("2000.0000"), "KRW");
+        RequestPaymentRequest request = new RequestPaymentRequest(order.getId(), amount, currency);
         int concurrency = 20; // Redis 없이 DB만으로 방어하므로 100 스케일 테스트(1.9)보다 가볍게
 
-        ExecutorService pool = Executors.newFixedThreadPool(10);
+        // 풀 크기를 concurrency와 같게 잡는다 — 더 작으면 뒤에 밀린 태스크가 시작도 못 한 채
+        // 앞선 태스크들이 go.await()에서 블로킹돼 ready가 0에 도달하지 못한다.
+        ExecutorService pool = Executors.newFixedThreadPool(concurrency);
         CountDownLatch ready = new CountDownLatch(concurrency);
         CountDownLatch go = new CountDownLatch(1);
         try {
@@ -92,7 +111,7 @@ class PaymentIdempotencyRedisDownTest {
 
             List<Future<PaymentResponse>> futures =
                     tasks.stream().map(pool::submit).collect(Collectors.toList());
-            ready.await(5, TimeUnit.SECONDS);
+            assertThat(ready.await(10, TimeUnit.SECONDS)).as("모든 스레드가 출발선에 도달해야 함").isTrue();
             go.countDown();
 
             Set<Long> paymentIds = new java.util.HashSet<>();

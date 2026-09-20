@@ -36,6 +36,7 @@ class OrderStatusTest {
         Order order = new Order(1L, 2, new java.math.BigDecimal("1000.0000"), "KRW");
         order.markFailed();
 
-        org.assertj.core.api.Assertions.assertThatThrownBy(order::markPaid).isInstanceOf(IllegalStateException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(order::markPaid)
+                .isInstanceOf(org.example.cs_study.common.InvalidStateTransitionException.class);
     }
 }
