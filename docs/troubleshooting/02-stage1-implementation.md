@@ -1,10 +1,11 @@
 # 1단계(모놀리식 결제 코어) 구현 트러블슈팅
 
 1단계(1.1~1.22, [PR #36](https://github.com/JoJimi/payment-lab/pull/36))를 구현하며 실전 CI에서
-발견한 실패 3건과, CodeRabbit 리뷰에서 나온 지적 16건을 원인·해결·영향 범위·재발 방지 순으로
-기록합니다. 전부 로컬에서 `./gradlew compileJava compileTestJava`로 컴파일을 검증했고,
-Docker 없이 돌아가는 테스트(`MockPgServerTest`, `OrderStatusTest`, `PaymentStatusTest`)는
-로컬에서, Testcontainers가 필요한 테스트는 GitHub Actions `build-test` 잡에서 확인했습니다.
+발견한 실패 3건, CodeRabbit 리뷰에서 나온 지적 16건, 그리고 그 16건을 고친 커밋이 CI에서
+새로 터뜨린 프레임워크 레벨 동시성 버그 1건을 원인·해결·영향 범위·재발 방지 순으로 기록합니다.
+전부 로컬에서 `./gradlew compileJava compileTestJava`로 컴파일을 검증했고, Docker 없이 돌아가는
+테스트(`MockPgServerTest`, `OrderStatusTest`, `PaymentStatusTest`)는 로컬에서, Testcontainers가
+필요한 테스트는 GitHub Actions `build-test` 잡에서 확인했습니다.
 
 환경: Spring Boot 4.1.1 / Java 21 / Gradle 9.7.1 / PostgreSQL 16 / Redis 7 / Redisson 4.7.0
 
@@ -586,6 +587,70 @@ public interface OrderPort {
 
 ---
 
+## 겪은 문제 — CodeRabbit 수정 커밋이 CI에서 새로 터뜨린 버그
+
+### 18. 스레드풀 크기를 고쳐 "진짜 동시성"이 되자 AspectJ 파라미터 바인딩이 드물게 깨짐
+
+**증상**
+16번(스레드풀 크기 수정) 커밋을 푸시한 뒤 CI `build-test`가 실패했다.
+`PaymentIdempotencyConcurrencyTest`(100건), `PaymentIdempotencyRedisDownTest`(20건) 둘 다
+같은 예외로 실패:
+```
+java.lang.IllegalStateException: Required to bind 2 arguments, but only bound 1
+    (JoinPointMatch was NOT bound in invocation)
+    at org.springframework.aop.aspectj.AbstractAspectJAdvice.argBinding(...)
+    at org.example.cs_study.payment.PaymentService$$SpringCGLIB$$0.requestPayment(<generated>)
+```
+
+**원인**
+`IdempotencyAspect`의 포인트컷이 `@Around("@annotation(idempotent)")` — 애노테이션 값을
+어드바이스 파라미터로 **바인딩하는** 형태였다. 이 바인딩 방식은 Spring AOP/AspectJ의 알려진
+동시성 버그를 갖고 있다: 매칭 결과(`JoinPointMatch`)를 계산·전달하는 내부 경로가 여러 스레드가
+같은 메서드를 진짜로 동시에 호출할 때 스레드 세이프하지 않아, 드물게(부하 테스트 기준 대략
+수십~수백 건 중 1건 수준) 파라미터 바인딩이 깨진다. 동일 증상이 보고된 바 있다
+([resilience4j/resilience4j#919](https://github.com/resilience4j/resilience4j/issues/919) —
+`@CircuitBreaker` 같은 다른 애노테이션 바인딩 포인트컷에서도 동시 부하 시 똑같은 예외 메시지).
+
+이 프로젝트에서 이 버그가 지금까지 한 번도 CI를 실패시키지 않았던 이유가 바로 위(13번
+항목)에서 고친 그 버그다 — 스레드풀 크기가 목표 동시 요청 수보다 작아서 `PaymentService.
+requestPayment()`가 실제로는 풀 크기(32/10)만큼만 동시에 호출되고 있었다. 16번 커밋으로
+풀 크기를 실제 목표(100/20)와 맞추면서 처음으로 이 메서드가 "진짜" 그 규모로 동시 호출됐고,
+그 순간 이전까지 숨어 있던 AspectJ 레벨 레이스가 CI에서 곧바로 드러났다. 즉 **한 버그(테스트가
+실제 동시성을 재현하지 못함)가 다른 버그(AOP 프레임워크의 동시성 결함)를 가리고 있었다.**
+
+**해결**
+포인트컷을 바인딩 없는 형태로 바꿨다 — 애노테이션 타입을 FQCN으로 직접 명시하고, 애노테이션
+인스턴스는 어드바이스 안에서 리플렉션으로 직접 읽는다. 이러면 AspectJ의 파라미터 바인딩
+경로(`argBinding`/`JoinPointMatch`) 자체를 타지 않으므로 이 레이스가 원천적으로 발생할 수 없다.
+```java
+// before
+@Around("@annotation(idempotent)")
+public Object around(ProceedingJoinPoint joinPoint, Idempotent idempotent) throws Throwable {
+
+// after
+@Around("@annotation(org.example.cs_study.common.idempotency.Idempotent)")
+public Object around(ProceedingJoinPoint joinPoint) throws Throwable {
+    MethodSignature signature = (MethodSignature) joinPoint.getSignature();
+    Idempotent idempotent = signature.getMethod().getAnnotation(Idempotent.class);
+```
+
+**영향 범위**
+`@Idempotent`가 붙은 모든 메서드(현재는 `PaymentService.requestPayment` 하나) — 부하 상황에서
+드물게 500 에러로 실패할 수 있었던 잠재적 결함이었다. 발생 확률이 낮아(수백 건 중 1건 수준)
+로컬 개발이나 가벼운 테스트에서는 거의 드러나지 않고, 딱 이번처럼 진짜 대량 동시 요청을 보낼 때만
+나타난다는 점이 위험하다.
+
+**재발 방지**
+`@annotation(paramName)`처럼 애노테이션 값을 파라미터로 바인딩하는 AspectJ 포인트컷은 동시성
+테스트로 실제 부하를 걸어봐야 이런 레이스가 드러난다는 걸 이번에 확인했다. 앞으로 이런 바인딩
+포인트컷을 새로 추가할 때는: (1) 애노테이션에 값이 필요 없으면 애초에 바인딩하지 않고
+`@annotation(FQCN)` + 리플렉션 조회를 기본값으로 쓴다, (2) 부득이 바인딩이 필요하면 최소
+1.9/1.10 규모(수십~수백 동시 요청)의 부하 테스트를 반드시 한 번은 통과시켜본다. 동시성 테스트를
+작성할 때 "스레드풀 크기가 목표 동시 요청 수와 같은가"(13번 항목)를 먼저 확인해야 하는
+이유이기도 하다 — 그게 틀리면 이런 프레임워크 레벨 버그까지 통째로 가려진다.
+
+---
+
 ## 요약
 
 | # | 분류 | 파일 | 한 줄 요약 |
@@ -607,3 +672,4 @@ public interface OrderPort {
 | 15 | 리뷰 | `OrderService`/락 구현체 2개 | 주문·재고 원자성 트레이드오프 문서화 |
 | 16 | 리뷰 | `PaymentService.java` | PG 호출을 트랜잭션 밖으로 분리 |
 | 17 | 리뷰 | `PaymentService.java` + `common.order.*` | 주문 검증 + 승인 시 `markPaid()` 연결 |
+| 18 | CI 재실패 | `IdempotencyAspect.java` | 애노테이션 바인딩 포인트컷의 AspectJ 동시성 버그 → 바인딩 없는 형태로 전환 |

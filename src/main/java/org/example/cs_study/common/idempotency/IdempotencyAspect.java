@@ -46,6 +46,15 @@ import tools.jackson.databind.ObjectMapper;
  * 바깥이 되면, {@link #around}가 {@code proceed()} 호출 전에 실행하는 {@code saveAndFlush}가
  * 이미 열려 있는 비즈니스 트랜잭션에 합류해버려서 "짧은 트랜잭션으로 즉시 커밋"이라는 전제가
  * 깨지고, 동시 요청이 그 커밋 전 상태를 보게 된다.
+ *
+ * <p><b>포인트컷을 바인딩 없는 형태로 쓴다:</b> {@code @Around("@annotation(idempotent)")}처럼
+ * 애노테이션 값을 파라미터로 바인딩하는 형태는 Spring AOP/AspectJ의 알려진 동시성 버그에
+ * 걸린다 — 매칭 결과({@code JoinPointMatch})를 넘기는 내부 상태가 스레드 세이프하지 않아,
+ * 진짜 동시 호출(1.9/1.10처럼 같은 메서드를 수십~수백 스레드가 동시에 통과)에서 드물게
+ * {@code IllegalStateException: Required to bind 2 arguments, but only bound 1}이 터진다
+ * (같은 증상 보고: resilience4j/resilience4j#919). 그래서 포인트컷은
+ * {@code @annotation(FQCN)} 형태(바인딩 없음)로 쓰고, {@link Idempotent}는 어드바이스
+ * 안에서 리플렉션으로 직접 읽는다 — 이러면 AspectJ의 파라미터 바인딩 경로 자체를 타지 않는다.
  */
 @Aspect
 @Component
@@ -76,11 +85,13 @@ public class IdempotencyAspect {
         this.meterRegistry = meterRegistry;
     }
 
-    @Around("@annotation(idempotent)")
-    public Object around(ProceedingJoinPoint joinPoint, Idempotent idempotent) throws Throwable {
+    @Around("@annotation(org.example.cs_study.common.idempotency.Idempotent)")
+    public Object around(ProceedingJoinPoint joinPoint) throws Throwable {
+        MethodSignature signature = (MethodSignature) joinPoint.getSignature();
+        Idempotent idempotent = signature.getMethod().getAnnotation(Idempotent.class);
         String key = resolveKey(joinPoint, idempotent);
         String redisKey = REDIS_KEY_PREFIX + key;
-        Class<?> returnType = ((MethodSignature) joinPoint.getSignature()).getReturnType();
+        Class<?> returnType = signature.getReturnType();
         Duration redisTtl = Duration.ofSeconds(idempotent.ttlSeconds());
 
         boolean redisAvailable = true;
