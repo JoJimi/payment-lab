@@ -61,6 +61,13 @@ spring:
 mockpg:
   base-url: http://localhost:8090
 
+# 1.11: 재고 차감 락 전략 스위치. NONE(대조군) / PESSIMISTIC / OPTIMISTIC / DISTRIBUTED.
+# 전환은 재기동 필요 — "한 번에 한 개념만 켠다" 원칙상 런타임 핫스위치는 만들지 않았다.
+inventory:
+  lock-strategy: OPTIMISTIC
+  optimistic-lock:
+    max-retries: 3 # 1.14에서 1/3/5/10으로 바꿔가며 측정
+
 server:
   port: 8080
   shutdown: graceful

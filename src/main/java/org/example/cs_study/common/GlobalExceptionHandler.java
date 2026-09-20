@@ -3,6 +3,7 @@ package org.example.cs_study.common;
 import java.util.Map;
 import org.example.cs_study.common.catalog.ProductNotFoundException;
 import org.example.cs_study.common.idempotency.IdempotencyInProgressException;
+import org.example.cs_study.common.inventory.InsufficientStockException;
 import org.example.cs_study.order.OrderNotFoundException;
 import org.example.cs_study.payment.PaymentNotFoundException;
 import org.springframework.http.HttpStatus;
@@ -18,8 +19,8 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", e.getMessage()));
     }
 
-    @ExceptionHandler(IdempotencyInProgressException.class)
-    public ResponseEntity<Map<String, String>> handleInProgress(IdempotencyInProgressException e) {
+    @ExceptionHandler({IdempotencyInProgressException.class, InsufficientStockException.class})
+    public ResponseEntity<Map<String, String>> handleConflict(RuntimeException e) {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of("error", e.getMessage()));
     }
 

@@ -12,6 +12,7 @@ import java.time.Instant;
 import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
+import org.example.cs_study.common.inventory.InsufficientStockException;
 
 /**
  * 상품 1개당 재고 1행(1:1). {@code available}/{@code reserved} 2단 모델은 2단계
@@ -53,6 +54,17 @@ public class Inventory {
         this.productId = productId;
         this.available = available;
         this.reserved = 0;
+    }
+
+    /**
+     * 검증(재고 부족)과 차감 로직 자체는 락 전략 4종이 공유한다. 전략마다 다른 건
+     * "이 메서드 호출 전후로 동시성을 어떻게 막는가"뿐이다 (1.11).
+     */
+    public void deduct(int quantity) {
+        if (this.available < quantity) {
+            throw new InsufficientStockException(productId);
+        }
+        this.available -= quantity;
     }
 
     @PreUpdate
