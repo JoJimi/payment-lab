@@ -2,6 +2,9 @@ package org.example.cs_study.order;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import org.example.cs_study.common.exception.InvalidStateTransitionException;
+import org.example.cs_study.order.domain.Order;
+import org.example.cs_study.order.domain.OrderStatus;
 import org.junit.jupiter.api.Test;
 
 /** docs/domain/state-transitions.md 표를 그대로 코드로 옮겼는지 검증. Docker 불필요. */
@@ -37,6 +40,6 @@ class OrderStatusTest {
         order.markFailed();
 
         org.assertj.core.api.Assertions.assertThatThrownBy(order::markPaid)
-                .isInstanceOf(org.example.cs_study.common.InvalidStateTransitionException.class);
+                .isInstanceOf(InvalidStateTransitionException.class);
     }
 }

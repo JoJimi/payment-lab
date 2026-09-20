@@ -1,6 +1,8 @@
 package org.example.cs_study.common.idempotency;
 
 import io.micrometer.core.instrument.MeterRegistry;
+import org.example.cs_study.common.exception.idempotency.IdempotencyInProgressException;
+import org.example.cs_study.common.exception.idempotency.IdempotencyKeyConflictException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
