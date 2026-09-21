@@ -16,7 +16,14 @@
 
 ## 실행 방법
 
+`scripts/measure-baseline.sh`/`.ps1`은 Hikari 풀 크기를 오버라이드하지 않는다 —
+`bootRun`은 `application-dev.yml`의 커밋된 기본값(20)을 그대로 쓴다. 아래 결과처럼
+pool=50 조건을 재현하려면 `bootRun` 실행 **전에** `application-dev.yml`의
+`spring.datasource.hikari.maximum-pool-size`를 50으로 직접 고쳐야 한다(수동 오버라이드,
+아직 커밋된 기본값은 아님 — 1.13 TODO대로 이 값 자체를 실험 변수로 정식화하는 건 후속 작업).
+
 ```bash
+# application-dev.yml의 maximum-pool-size를 50으로 수정한 뒤:
 docker compose -f docker-compose.yml up -d
 ./gradlew mockPgRun &
 ./gradlew bootRun &
