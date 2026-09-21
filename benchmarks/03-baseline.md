@@ -7,7 +7,7 @@
 
 | 항목 | 값 |
 |---|---|
-| Hikari `maximum-pool-size` | 50 (로컬에서 20 → 50으로 변경, 커밋되지 않은 로컬 설정. 저장소 기본값은 20) |
+| Hikari `maximum-pool-size` | 50 (저장소 커밋된 기본값. 측정 당시엔 로컬 수동 변경이었으나 이후 PR #40으로 커밋됨) |
 | `inventory.lock-strategy` | OPTIMISTIC (기본값) |
 | VUs / Duration | 20 / 60s |
 | 반복 | 워밍업 1회 + 측정 3회, 중앙값 |
@@ -16,14 +16,12 @@
 
 ## 실행 방법
 
-`scripts/measure-baseline.sh`/`.ps1`은 Hikari 풀 크기를 오버라이드하지 않는다 —
-`bootRun`은 `application-dev.yml`의 커밋된 기본값(20)을 그대로 쓴다. 아래 결과처럼
-pool=50 조건을 재현하려면 `bootRun` 실행 **전에** `application-dev.yml`의
-`spring.datasource.hikari.maximum-pool-size`를 50으로 직접 고쳐야 한다(수동 오버라이드,
-아직 커밋된 기본값은 아님 — 1.13 TODO대로 이 값 자체를 실험 변수로 정식화하는 건 후속 작업).
+`application-dev.yml`의 `maximum-pool-size`가 50으로 커밋돼 있어(PR #40),
+`scripts/measure-baseline.sh`/`.ps1`이 오버라이드를 하지 않아도 `bootRun`이 이 값을
+그대로 쓴다. 별도 수동 변경 없이 아래대로 실행하면 된다 — 다른 pool 값으로 측정하려면
+1.13 TODO대로 `maximum-pool-size`를 바꾸고 그 값을 측정표에 명시할 것.
 
 ```bash
-# application-dev.yml의 maximum-pool-size를 50으로 수정한 뒤:
 docker compose -f docker-compose.yml up -d
 ./gradlew mockPgRun &
 ./gradlew bootRun &
@@ -33,7 +31,6 @@ docker compose -f docker-compose.yml up -d
 Windows(PowerShell 5.1, Windows 기본 제공 `powershell.exe` — PowerShell 7/Core 아님):
 
 ```powershell
-# application-dev.yml의 maximum-pool-size를 50으로 수정한 뒤:
 docker compose -f docker-compose.yml up -d
 Start-Job { .\gradlew.bat mockPgRun }
 Start-Job { .\gradlew.bat bootRun }
