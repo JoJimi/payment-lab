@@ -27,7 +27,17 @@ pool=50 조건을 재현하려면 `bootRun` 실행 **전에** `application-dev.y
 docker compose -f docker-compose.yml up -d
 ./gradlew mockPgRun &
 ./gradlew bootRun &
-./scripts/measure-baseline.sh   # Windows는 scripts/measure-baseline.ps1
+./scripts/measure-baseline.sh
+```
+
+Windows(PowerShell 5.1, Windows 기본 제공 `powershell.exe` — PowerShell 7/Core 아님):
+
+```powershell
+# application-dev.yml의 maximum-pool-size를 50으로 수정한 뒤:
+docker compose -f docker-compose.yml up -d
+Start-Job { .\gradlew.bat mockPgRun }
+Start-Job { .\gradlew.bat bootRun }
+.\scripts\measure-baseline.ps1
 ```
 
 ## 결과
@@ -47,7 +57,7 @@ docker compose -f docker-compose.yml up -d
 | TPS | 9.23/s |
 | p50 | 1.63s |
 | p95 | 5.54s |
-| p99 | 미측정 (k6 기본 요약에 미포함 — 추후 `--summary-trend-stats "p(99)"` 추가 필요) |
+| p99 | 미측정 (k6 기본 요약엔 p90/p95까지만 나옴. `--summary-trend-stats`는 기존 목록에 추가가 아니라 전체를 대체하므로, 추후 측정 시 `--summary-trend-stats "avg,min,med,max,p(90),p(95),p(99)"`처럼 전체 목록으로 지정해야 함) |
 | 에러율 | 40.54% |
 
 ## 참고
