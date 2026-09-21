@@ -3,6 +3,7 @@ package org.example.cs_study.inventory.service;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import org.example.cs_study.common.exception.catalog.ProductNotFoundException;
+import org.example.cs_study.common.exception.inventory.InventoryLockTimeoutException;
 import org.example.cs_study.inventory.domain.Inventory;
 import org.example.cs_study.inventory.domain.InventoryLockStrategy;
 import org.example.cs_study.inventory.repository.InventoryRepository;
@@ -32,6 +33,12 @@ class OptimisticLockStockDeductor implements StockDeductor {
     private final InventoryRepository inventoryRepository;
     private final TransactionTemplate transactionTemplate;
     private final MeterRegistry meterRegistry;
+    // 1.14는 1/3/5/10까지만 실험 대상이지만, InventoryConcurrencyTest(1.12)는 "재시도 소진으로 인한
+    // 실패"를 배제하고 순수 안전성 불변식(초과 판매 없음)만 보려고 500을 쓴다 — 그 값은 허용해야 한다.
+    // 다만 설정 오타 등으로 들어올 수 있는 진짜 병적인 값(예: max-retries=2147483647)은 요청 스레드와
+    // DB 커넥션을 사실상 무기한 붙잡을 수 있어 기동 시점에 걷어낸다.
+    private static final int MAX_ALLOWED_RETRIES = 1000;
+
     private final int maxRetries;
 
     OptimisticLockStockDeductor(
@@ -39,6 +46,10 @@ class OptimisticLockStockDeductor implements StockDeductor {
             PlatformTransactionManager transactionManager,
             MeterRegistry meterRegistry,
             @Value("${inventory.optimistic-lock.max-retries:3}") int maxRetries) {
+        if (maxRetries < 0 || maxRetries > MAX_ALLOWED_RETRIES) {
+            throw new IllegalArgumentException(
+                    "inventory.optimistic-lock.max-retries는 0~" + MAX_ALLOWED_RETRIES + " 범위여야 합니다: " + maxRetries);
+        }
         this.inventoryRepository = inventoryRepository;
         this.meterRegistry = meterRegistry;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
@@ -68,8 +79,13 @@ class OptimisticLockStockDeductor implements StockDeductor {
                     // maxRetries는 "최초 시도 이후 재시도 횟수"다. 증가를 검사 뒤로 옮겨야
                     // maxRetries번 재시도(= 총 maxRetries+1회 시도)한다 — 앞뒤가 바뀌면
                     // maxRetries=1일 때 재시도를 한 번도 못 하고 즉시 예외가 새어나간다.
+                    //
+                    // 재시도를 다 쓰면 원본 Hibernate/Spring 예외를 그대로 던지지 않는다 —
+                    // BusinessException이 아니라서 GlobalExceptionHandler가 못 잡고 스택트레이스가
+                    // 그대로 노출된 500으로 샌다(실측: VUS=20 부하에서 재현). 도메인 예외로
+                    // 변환해 표준 ErrorResponse(503, INV002)로 응답하게 한다.
                     if (attempt >= maxRetries) {
-                        throw e;
+                        throw new InventoryLockTimeoutException(productId, e);
                     }
                     attempt++;
                 }
