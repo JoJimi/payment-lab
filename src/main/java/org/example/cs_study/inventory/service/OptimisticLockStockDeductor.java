@@ -3,6 +3,7 @@ package org.example.cs_study.inventory.service;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import org.example.cs_study.common.exception.catalog.ProductNotFoundException;
+import org.example.cs_study.common.exception.inventory.InventoryLockTimeoutException;
 import org.example.cs_study.inventory.domain.Inventory;
 import org.example.cs_study.inventory.domain.InventoryLockStrategy;
 import org.example.cs_study.inventory.repository.InventoryRepository;
@@ -68,8 +69,13 @@ class OptimisticLockStockDeductor implements StockDeductor {
                     // maxRetries는 "최초 시도 이후 재시도 횟수"다. 증가를 검사 뒤로 옮겨야
                     // maxRetries번 재시도(= 총 maxRetries+1회 시도)한다 — 앞뒤가 바뀌면
                     // maxRetries=1일 때 재시도를 한 번도 못 하고 즉시 예외가 새어나간다.
+                    //
+                    // 재시도를 다 쓰면 원본 Hibernate/Spring 예외를 그대로 던지지 않는다 —
+                    // BusinessException이 아니라서 GlobalExceptionHandler가 못 잡고 스택트레이스가
+                    // 그대로 노출된 500으로 샌다(실측: VUS=20 부하에서 재현). 도메인 예외로
+                    // 변환해 표준 ErrorResponse(503, INV002)로 응답하게 한다.
                     if (attempt >= maxRetries) {
-                        throw e;
+                        throw new InventoryLockTimeoutException(productId, e);
                     }
                     attempt++;
                 }
