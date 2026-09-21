@@ -44,3 +44,7 @@ logs/
 *.sarif
 .trivy/
 .claude/
+
+# 벤치마크 raw 산출물(k6 summary export)은 로컬 전용. 결과는 요약해서
+# benchmarks/*.md 에만 커밋한다 (01-lock-strategies.md 컨벤션).
+benchmarks/raw/*.json
