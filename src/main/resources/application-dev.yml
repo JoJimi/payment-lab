@@ -15,7 +15,12 @@ spring:
       # TODO(3.9): "방어 없으면 커넥션 풀 고갈로 전체가 멈춘다"를 재현할 때
       #             이 값이 실험의 핵심 변수가 됨. 풀 20 + PG 응답 5초면
       #             21번째 요청부터 줄을 섬.
-      maximum-pool-size: 20
+      #
+      # 20 -> 50: OrderService.createOrder(바깥 @Transactional) + OptimisticLockStockDeductor
+      # (REQUIRES_NEW로 별도 커넥션)가 요청 1건당 커넥션 2개를 동시에 쓴다. 풀 20으로는
+      # VUS=20 부하에서 실제로 고갈되는 걸 실측(HikariPool-1 ... request timed out) —
+      # benchmarks/03-baseline.md 참고.
+      maximum-pool-size: 50
       minimum-idle: 5
 
   jpa:
