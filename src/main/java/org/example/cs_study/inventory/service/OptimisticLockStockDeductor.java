@@ -33,6 +33,12 @@ class OptimisticLockStockDeductor implements StockDeductor {
     private final InventoryRepository inventoryRepository;
     private final TransactionTemplate transactionTemplate;
     private final MeterRegistry meterRegistry;
+    // 1.14는 1/3/5/10까지만 실험 대상이지만, InventoryConcurrencyTest(1.12)는 "재시도 소진으로 인한
+    // 실패"를 배제하고 순수 안전성 불변식(초과 판매 없음)만 보려고 500을 쓴다 — 그 값은 허용해야 한다.
+    // 다만 설정 오타 등으로 들어올 수 있는 진짜 병적인 값(예: max-retries=2147483647)은 요청 스레드와
+    // DB 커넥션을 사실상 무기한 붙잡을 수 있어 기동 시점에 걷어낸다.
+    private static final int MAX_ALLOWED_RETRIES = 1000;
+
     private final int maxRetries;
 
     OptimisticLockStockDeductor(
@@ -40,6 +46,10 @@ class OptimisticLockStockDeductor implements StockDeductor {
             PlatformTransactionManager transactionManager,
             MeterRegistry meterRegistry,
             @Value("${inventory.optimistic-lock.max-retries:3}") int maxRetries) {
+        if (maxRetries < 0 || maxRetries > MAX_ALLOWED_RETRIES) {
+            throw new IllegalArgumentException(
+                    "inventory.optimistic-lock.max-retries는 0~" + MAX_ALLOWED_RETRIES + " 범위여야 합니다: " + maxRetries);
+        }
         this.inventoryRepository = inventoryRepository;
         this.meterRegistry = meterRegistry;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
