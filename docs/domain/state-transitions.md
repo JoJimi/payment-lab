@@ -60,3 +60,48 @@ PG 호출이 타임아웃되면 **PG는 승인을 완료했는데 응답만 못 
   위 표에 없는 전이는 `IllegalStateException`을 던진다.
 - 상태 변경은 엔티티 메서드(`order.markPaid()` 등) 안에서만 일어나고, 세터로 직접
   상태를 바꾸지 않는다 — 전이 규칙을 우회할 방법을 없앤다.
+
+## 2단계 Saga 상태 (`SagaStatus`, `SagaStepStatus`) — 2.11
+
+`saga_instance.status`(로드맵 부록 A-2). `OrderStatus`/`PaymentStatus`와 같은
+`canTransitionTo(target)` 패턴을 그대로 따른다(`order-service`
+`org.example.cs_study.order.domain.saga` 패키지).
+
+```
+STARTED     ──(모든 스텝 성공)────────→ COMPLETED
+STARTED     ──(스텝 실패, 보상 개시)──→ COMPENSATING
+COMPENSATING ──(보상 전부 성공)───────→ COMPLETED
+COMPENSATING ──(보상 자체가 실패)─────→ FAILED
+```
+
+| From \ To | STARTED | COMPENSATING | COMPLETED | FAILED |
+|---|---|---|---|---|
+| **STARTED** | - | ✅ | ✅ | ❌ |
+| **COMPENSATING** | ❌ | - | ✅ | ✅ |
+| **COMPLETED** | ❌ | ❌ | - | ❌ |
+| **FAILED** | ❌ | ❌ | ❌ | - |
+
+`COMPENSATING`에서 갈라지는 두 종착점이 핵심이다. 보상이 끝까지 성공하면 `COMPLETED`다 —
+정상 흐름이 끝까지 간 것도, 실패해서 깨끗이 취소된 것도 Saga 입장에서는 똑같이
+"의도한 대로 마무리됨"이기 때문이다. 반대로 보상 자체가 실패하면(예: 취소 이벤트
+발행이 안 됨, 재고 해제 응답이 안 옴) `FAILED`로 남는다 — 이건 사람 개입이나 DLQ
+재처리(2.16)가 필요한, Saga가 스스로 못 끝낸 상태다.
+
+`saga_step.status`(개별 스텝의 시도 기록):
+
+```
+PENDING ──(성공 응답)──→ SUCCESS
+PENDING ──(실패 응답)──→ FAILED
+SUCCESS ──(보상 실행)──→ COMPENSATED
+```
+
+| From \ To | PENDING | SUCCESS | FAILED | COMPENSATED |
+|---|---|---|---|---|
+| **PENDING** | - | ✅ | ✅ | ❌ |
+| **SUCCESS** | ❌ | - | ❌ | ✅ |
+| **FAILED** | ❌ | ❌ | - | ❌ |
+| **COMPENSATED** | ❌ | ❌ | ❌ | - |
+
+`FAILED`는 종료 상태이고 `COMPENSATED`로 가지 않는다 — 한 번도 성공한 적 없는 스텝은
+되돌릴 부수효과 자체가 없다(예: 결제 승인이 거절됐으면 취소할 결제가 없다). 오직
+`SUCCESS`한 스텝만 보상 대상이다.
