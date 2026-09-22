@@ -19,12 +19,16 @@ import org.springframework.stereotype.Component;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * Saga 정상 흐름의 세 번째 이음매(2.12) — inventory-service가 재고 예약(+확정)에 성공하면
- * Saga를 NOTIFICATION 단계로 넘기고 {@code notification.requested}를 발행한다. 이 이벤트가
- * 나가면(Outbox에 적재되면) Saga 입장에서 남은 정상 흐름 단계가 없다 — 완료 처리
- * ({@code sagaInstance.complete()})는 2.13에서 보상 흐름과 함께 정리한다(알림 자체는
- * 실패해도 보상하지 않는 것이 로드맵 방침이라, "Saga가 언제 COMPLETED로 확정되는가"는
- * 보상 경계 설계와 묶어서 다루는 게 맞다).
+ * Saga 정상 흐름의 세 번째이자 마지막 이음매(2.12/2.13) — inventory-service가 재고
+ * 예약(+확정)에 성공하면 Saga를 NOTIFICATION 단계로 넘기고 {@code notification.requested}를
+ * 발행한 뒤, 그 자리에서 바로 Saga를 완료(COMPLETED) 처리한다.
+ *
+ * <p><b>알림 전달을 기다리지 않고 바로 완료하는 이유(2.13에서 확정)</b>: 알림 실패는 보상
+ * 대상이 아니다(로드맵 방침) — notification-service가 실제로 알림을 보냈는지 확인하는
+ * 이벤트 자체가 카탈로그에 없고, 있어도 Saga가 기다릴 이유가 없다(기다렸다 실패하면 뭘 할
+ * 것인가? 보상하지 않기로 했으니 할 일이 없다). 그래서 "발송 지시를 Outbox에 적재했다"를
+ * NOTIFICATION 스텝의 성공이자 Saga 전체의 완료로 본다 — INVENTORY 스텝(reserve+confirm)을
+ * 같은 트랜잭션에서 바로 확정 처리한 2.12의 설계와 같은 논리다.
  */
 @Component
 public class InventoryReservedListener {
@@ -72,13 +76,18 @@ public class InventoryReservedListener {
         sagaStepRepository.save(inventoryStep);
 
         sagaInstance.advanceTo(SagaStepName.NOTIFICATION);
-        sagaInstanceRepository.save(sagaInstance);
 
         NotificationRequestedPayload notificationPayload = new NotificationRequestedPayload(
                 payload.orderId(), NotificationType.ORDER_COMPLETED, "주문이 완료됐습니다: orderId=" + payload.orderId());
-        sagaStepRepository.save(new SagaStep(
-                sagaInstance.getSagaId(), SagaStepName.NOTIFICATION, objectMapper.writeValueAsString(notificationPayload)));
+        String notificationJson = objectMapper.writeValueAsString(notificationPayload);
+        SagaStep notificationStep = new SagaStep(sagaInstance.getSagaId(), SagaStepName.NOTIFICATION, notificationJson);
+        // 클래스 Javadoc 참고 — 알림 전달 확인 이벤트가 없어 Outbox 적재 자체를 성공으로 본다.
+        notificationStep.succeed(notificationJson);
+        sagaStepRepository.save(notificationStep);
         outboxService.save(
                 EventType.NOTIFICATION_REQUESTED, "Order", payload.orderId().toString(), notificationPayload);
+
+        sagaInstance.complete();
+        sagaInstanceRepository.save(sagaInstance);
     }
 }

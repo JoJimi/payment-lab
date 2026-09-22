@@ -11,12 +11,15 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.example.cs_study.event.EventEnvelopeFactory;
 import org.example.cs_study.event.EventType;
+import org.example.cs_study.event.payload.InventoryFailedPayload;
 import org.example.cs_study.event.payload.InventoryReservedPayload;
 import org.example.cs_study.event.payload.PaymentCompletedPayload;
+import org.example.cs_study.event.payload.PaymentFailedPayload;
 import org.example.cs_study.order.OrderServiceApplication;
 import org.example.cs_study.order.domain.Order;
 import org.example.cs_study.order.domain.OrderStatus;
 import org.example.cs_study.order.domain.saga.SagaInstance;
+import org.example.cs_study.order.domain.saga.SagaStatus;
 import org.example.cs_study.order.domain.saga.SagaStep;
 import org.example.cs_study.order.domain.saga.SagaStepName;
 import org.example.cs_study.order.domain.saga.SagaStepStatus;
@@ -41,17 +44,26 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * order-service 쪽 Saga 정상 흐름 리스너 2개({@link PaymentCompletedListener},
- * {@link InventoryReservedListener})가 실제로 이어 붙는지 끝까지 검증한다(2.12).
+ * order-service 쪽 Saga 리스너들이 실제로 이어 붙는지 끝까지 검증한다 — 정상 흐름 2개
+ * ({@link PaymentCompletedListener}, {@link InventoryReservedListener}, 2.12)와 보상 흐름
+ * 2개({@link PaymentFailedListener}, {@link InventoryFailedListener}, 2.13).
  * {@code OrderServiceApplication} 전체 컨텍스트 + 임베디드 Kafka + Testcontainers Postgres.
  *
  * <p>흐름: {@link OrderService#createOrder}로 실제 주문/Saga를 만든 뒤, payment-service와
  * inventory-service가 보냈을 법한 이벤트를 이 테스트가 대신 발행해 리스너를 트리거하고,
- * 매번 Saga/주문 상태와 (마지막 단계는) 실제로 Kafka까지 나간 {@code notification.requested}를
- * 확인한다.
+ * 매번 Saga/주문 상태와 (마지막 단계는) 실제로 Kafka까지 나간 이벤트를 확인한다.
  */
 @Testcontainers
-@EmbeddedKafka(partitions = 1, topics = {"payment.completed", "inventory.reserved", "notification.requested"})
+@EmbeddedKafka(
+        partitions = 1,
+        topics = {
+            "payment.completed",
+            "inventory.reserved",
+            "notification.requested",
+            "payment.failed",
+            "inventory.failed",
+            "order.cancelled"
+        })
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.NONE,
         classes = OrderServiceApplication.class,
@@ -136,6 +148,76 @@ class SagaListenersIntegrationTest {
         } finally {
             consumer.close();
         }
+
+        // 2.13: notification.requested가 나간 시점에 Saga가 바로 COMPLETED로 확정된다(알림
+        // 전달 확인을 기다리지 않음, InventoryReservedListener Javadoc 참고).
+        awaitSagaStatus(sagaInstance.getSagaId(), SagaStatus.COMPLETED);
+    }
+
+    @Test
+    void payment_failed를_받으면_보상없이_곧장_주문을_취소하고_Saga를_완료한다() {
+        OrderResponse order = orderService.createOrder(new CreateOrderRequest(21L, 1, new BigDecimal("1000.0000"), "KRW"));
+        SagaInstance sagaInstance = sagaInstanceRepository.findByOrderId(order.id()).orElseThrow();
+
+        publish(
+                "payment.failed",
+                order.id().toString(),
+                EventType.PAYMENT_FAILED,
+                new PaymentFailedPayload(order.id(), 111L, new BigDecimal("1000.0000"), "KRW", "INSUFFICIENT_FUNDS"));
+
+        awaitOrderStatus(order.id(), OrderStatus.CANCELLED);
+        awaitSagaStep(sagaInstance.getSagaId(), SagaStepName.PAYMENT, SagaStepStatus.FAILED);
+        awaitSagaStatus(sagaInstance.getSagaId(), SagaStatus.COMPLETED);
+
+        assertNotificationRequestedPublished(order.id());
+    }
+
+    @Test
+    void inventory_failed를_받으면_결제_스텝을_보상대상으로_표시하고_주문을_취소한다() {
+        OrderResponse order = orderService.createOrder(new CreateOrderRequest(22L, 5, new BigDecimal("500.0000"), "KRW"));
+        SagaInstance sagaInstance = sagaInstanceRepository.findByOrderId(order.id()).orElseThrow();
+
+        publish(
+                "payment.completed",
+                order.id().toString(),
+                EventType.PAYMENT_COMPLETED,
+                new PaymentCompletedPayload(order.id(), 998L, "tx-2", new BigDecimal("500.0000"), "KRW", Instant.now()));
+        awaitSagaStep(sagaInstance.getSagaId(), SagaStepName.PAYMENT, SagaStepStatus.SUCCESS);
+
+        publish(
+                "inventory.failed",
+                order.id().toString(),
+                EventType.INVENTORY_FAILED,
+                new InventoryFailedPayload(order.id(), 22L, 5, "OUT_OF_STOCK"));
+
+        awaitOrderStatus(order.id(), OrderStatus.CANCELLED);
+        awaitSagaStep(sagaInstance.getSagaId(), SagaStepName.INVENTORY, SagaStepStatus.FAILED);
+        awaitSagaStep(sagaInstance.getSagaId(), SagaStepName.PAYMENT, SagaStepStatus.COMPENSATED);
+        awaitSagaStatus(sagaInstance.getSagaId(), SagaStatus.COMPLETED);
+
+        assertNotificationRequestedPublished(order.id());
+
+        Consumer<String, String> consumer = createConsumer();
+        try {
+            embeddedKafkaBroker.consumeFromAnEmbeddedTopic(consumer, "order.cancelled");
+            ConsumerRecord<String, String> record =
+                    KafkaTestUtils.getSingleRecord(consumer, "order.cancelled", Duration.ofSeconds(10));
+            assertThat(record.value()).contains("\"orderId\":" + order.id());
+        } finally {
+            consumer.close();
+        }
+    }
+
+    private void assertNotificationRequestedPublished(Long orderId) {
+        Consumer<String, String> consumer = createConsumer();
+        try {
+            embeddedKafkaBroker.consumeFromAnEmbeddedTopic(consumer, "notification.requested");
+            ConsumerRecord<String, String> record =
+                    KafkaTestUtils.getSingleRecord(consumer, "notification.requested", Duration.ofSeconds(10));
+            assertThat(record.value()).contains("\"orderId\":" + orderId).contains("ORDER_CANCELLED");
+        } finally {
+            consumer.close();
+        }
     }
 
     private <T> void publish(String topic, String key, EventType eventType, T payload) {
@@ -164,6 +246,14 @@ class SagaListenersIntegrationTest {
                 .map(SagaInstance::getCurrentStep)
                 .filter(expected::equals)
                 .isPresent(), "sagaId=" + sagaId + "의 currentStep이 " + expected + "로 전진하지 않았습니다");
+    }
+
+    private void awaitSagaStatus(String sagaId, SagaStatus expected) {
+        awaitTrue(() -> sagaInstanceRepository
+                .findById(sagaId)
+                .map(SagaInstance::getStatus)
+                .filter(expected::equals)
+                .isPresent(), "sagaId=" + sagaId + "의 status가 " + expected + "가 되지 않았습니다");
     }
 
     private void awaitTrue(java.util.function.BooleanSupplier condition, String failureMessage) {

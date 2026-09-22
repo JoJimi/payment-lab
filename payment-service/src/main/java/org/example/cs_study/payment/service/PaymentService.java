@@ -11,6 +11,7 @@ import org.example.cs_study.event.payload.PaymentFailedPayload;
 import org.example.cs_study.payment.client.MockPgClient;
 import org.example.cs_study.payment.client.MockPgResult;
 import org.example.cs_study.payment.domain.Payment;
+import org.example.cs_study.payment.domain.PaymentStatus;
 import org.example.cs_study.payment.dto.request.RequestPaymentRequest;
 import org.example.cs_study.payment.dto.response.PaymentResponse;
 import org.example.cs_study.payment.repository.PaymentRepository;
@@ -181,5 +182,22 @@ public class PaymentService {
         Payment payment = paymentRepository.findById(paymentId).orElseThrow(() -> new PaymentNotFoundException(paymentId));
         payment.cancel();
         return PaymentResponse.from(payment);
+    }
+
+    /**
+     * Saga 보상 트랜잭션의 실행 지점(2.13, {@code OrderCancelledListener}) — 이 주문에 결제가
+     * 승인(APPROVED)된 상태로 남아있으면 취소한다. APPROVED가 아니면(결제 자체가 실패해서
+     * 보상이 시작됐거나, 이미 취소된 재전달이거나) 조용히 넘어간다 — {@link Payment#cancel}은
+     * APPROVED에서만 허용되는 전이라 호출 전에 걸러야 한다. 이 필터링 자체가 이 메서드를
+     * 멱등하게 만든다(2.14 "보상 자체의 멱등성"을 여기서 미리 만족).
+     */
+    @Transactional
+    public void cancelForOrder(Long orderId) {
+        paymentRepository.findByOrderId(orderId).stream()
+                .filter(payment -> payment.getStatus() == PaymentStatus.APPROVED)
+                .forEach(payment -> {
+                    payment.cancel();
+                    paymentRepository.save(payment);
+                });
     }
 }

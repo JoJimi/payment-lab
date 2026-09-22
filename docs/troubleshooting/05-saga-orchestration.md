@@ -114,3 +114,69 @@ Outbox 행 적재까지 확인), `SagaListenersIntegrationTest`(order-service/in
 예외로 실패하는 것까지 확인했고(컴파일은 전부 통과), 실제 실행은 CI에 맡긴다. 반면
 `InventoryTest`(`reserve`/`confirm`)와 `EventEnvelopeReaderTest`(common-event, 새로 추가한
 디코딩 헬퍼의 왕복 직렬화 검증)는 순수 단위 테스트라 로컬에서 전부 통과를 확인했다.
+
+### 3. 보상 트랜잭션 (2.13)
+
+**`SagaCompensationService`로 두 트리거({@code payment.failed}/{@code inventory.failed})의
+공통 마무리를 뽑아낸 이유**: 두 리스너 모두 "자기 스텝을 기록 → `beginCompensation()` →
+주문 취소 → `order.cancelled` 발행 → 취소 알림 발행 → Saga 완료"의 뒷부분이 완전히
+동일하다 — 다른 건 "어떤 스텝이 왜 실패했는가"뿐이다. 그 앞부분(스텝별 기록)은 각 리스너에
+남기고, 뒷부분만 공통 서비스로 뽑아 중복을 없앴다.
+
+**`payment.failed`는 아무것도 보상하지 않고 바로 주문을 취소하는 이유**: PAYMENT 스텝은
+이 시점에 한 번도 성공한 적이 없다(`SagaStepStatus.FAILED`는 `COMPENSATED`로 못 가는
+이유와 같은 논리, 2.11). 되돌릴 부수효과 자체가 없으므로 "보상"은 사실상 주문 취소뿐이다.
+
+**`inventory.failed`가 와도 inventory-service에 아무것도 요청하지 않는 이유**: 2.12에서
+`reserve()`와 `confirm()`을 같은 트랜잭션에서 바로 잇달아 부르기로 한 설계 때문에, 재고
+부족으로 예약이 실패하면 `available`/`reserved` 어느 쪽도 바뀌지 않는다(`Inventory.reserve`가
+확인 후 예외만 던지고 끝) — 그래서 "재고를 해제해달라"는 이벤트 자체가 필요 없다. 이
+설계가 나중에 바뀌면(예: 예약과 확정 사이에 시간차를 두는 시나리오가 생기면) 이 가정도
+같이 재검토해야 한다.
+
+**`inventory.failed` 처리에서 PAYMENT 스텝을 낙관적으로 `COMPENSATED`로 기록하는 이유**:
+order-service는 실제로 결제가 취소됐는지 확인할 방법이 없다 — `order.cancelled`를 던질
+뿐, payment-service가 그 결과를 알려주는 이벤트가 카탈로그에 없다. 이는 정상 흐름에서
+`inventory.reserved` 수신 즉시 INVENTORY 스텝을 성공으로 기록하는 것과 같은 패턴이다
+(2.12) — order-service는 애초에 다른 서비스의 로컬 상태를 직접 확인할 수단이 없고, 그게
+바로 이 시스템이 MSA인 이유다. "정말로 취소됐는지" 보장은 `order.cancelled`가 최종적으로
+전달된다는 것(Outbox+Kafka at-least-once)과 payment-service 쪽 처리가 멱등하다는 것(아래)
+두 가지가 함께 만든다.
+
+**보상 마무리에서 `sagaInstance.currentStep`을 안 건드리는 이유**: 정상 흐름은 각 리스너가
+`advanceTo()`로 다음 단계를 명시한다. 보상 흐름은 "다음 단계로 나아가는" 게 아니라
+"실패한 지점에서 멈춘 것"이므로, `currentStep`을 그대로 두면 나중에 이 Saga를 들여다볼 때
+"어디서 실패해 되돌아갔는지"가 바로 보인다 — `NOTIFICATION`으로 옮기면 오히려 "정상적으로
+거기까지 진행했다"는 오해를 준다.
+
+**2.12에서 미뤄뒀던 `SagaInstance.complete()` 호출 시점을 여기서 확정한 이유**: 정상
+흐름(알림 발행 직후)과 보상 흐름(취소 알림 발행 직후) 둘 다 "더 이상 결과를 기다릴 이벤트가
+없는 시점"이 정확히 같은 자리다 — notification-service가 알림을 실제로 보냈는지 확인하는
+이벤트가 카탈로그에 없고, 있어도 Saga가 그걸 기다릴 이유가 없다(알림 실패는 보상 대상이
+아니므로 기다렸다 실패해도 할 일이 없다). 그래서 두 경로 모두 "알림 발행 지시를 Outbox에
+적재했다"를 Saga 완료의 기준으로 삼았다. `InventoryReservedListener`의 NOTIFICATION 스텝도
+이번에 `succeed()`를 실제로 호출하도록 고쳤다 — 2.12에서는 스텝을 만들기만 하고 한 번도
+성공으로 전이시키지 않아 영원히 PENDING으로 남는 버그가 있었다.
+
+**`payment-service`의 `OrderCancelledListener`가 `PaymentRequestedListener`와 달리
+`InboxService`를 쓰는 이유**: `PaymentRequestedListener`가 Inbox를 피한 이유(Mock PG
+호출이 `@Transactional` 밖에 있어야 하는 원칙과의 충돌)가 여기엔 없다 — 결제 취소는
+로컬 상태 전이(`Payment.cancel()`)뿐이고 외부 PG를 다시 부르지 않는다. 그래서 다른
+정상 흐름 리스너들과 같은 패턴을 그대로 따른다.
+
+**`PaymentService.cancelForOrder()`가 멱등한 이유**: `order_id`로 조회한 뒤 상태가
+APPROVED인 것만 걸러 취소한다 — 이미 CANCELLED거나(재전달) FAILED인(애초에 이 보상을
+유발한 그 결제 자신) 결제는 그냥 지나친다. `Payment.cancel()`은 APPROVED에서만 허용되는
+전이라 필터링 없이 무작정 호출하면 재전달 시 `InvalidStateTransitionException`이 났을
+것이다. 별도의 이벤트-ID 기반 중복 방지(Inbox) 없이도 이 메서드 자체가 안전하다 — 2.14
+"보상 자체의 멱등성"이 다룰 문제의 한 사례를 여기서 미리 만족한 셈이다.
+
+**로컬에서 실제로 검증한 것**: order-service `SagaListenersIntegrationTest`에 보상 흐름
+2개(payment.failed, inventory.failed)를 추가했고, payment-service에
+`OrderCancelledListenerTest`(APPROVED 결제 취소 + FAILED 결제 무시 2케이스)를 새로
+작성했다 — 전부 `@EmbeddedKafka` + Testcontainers Postgres(+payment-service는 Redis, Mock
+PG)가 필요해 이 원격 환경(Docker 없음)에서는 못 돌렸다. 컴파일(`compileJava`
+`compileTestJava` 전체 모듈)은 통과를 확인했고, 이번 태스크는 새 도메인 상태 전이를
+추가하지 않아(기존 `SagaStatus`/`SagaStepStatus`/`PaymentStatus` 전이 규칙을 그대로 씀)
+2.11의 순수 단위 테스트(`SagaStatusTest`/`SagaStepStatusTest`/`SagaInstanceTest`/
+`SagaStepTest`)를 로컬에서 재실행해 회귀가 없음을 확인했다.
