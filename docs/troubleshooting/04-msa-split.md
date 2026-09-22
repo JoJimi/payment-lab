@@ -7,8 +7,9 @@
 
 환경: Spring Boot 4.1.1 / Java 21 / Gradle 9.7.1 — 이 세션은 Docker가 없는 원격 컨테이너라
 컴파일/패키징(`compileJava`/`compileTestJava`/`assemble`)과 Docker 불필요 테스트
-(`MockPgServerTest`/`OrderStatusTest`/`PaymentStatusTest`)까지만 실측 검증했다. Testcontainers
-기반 통합 테스트와 실제 기동은 로컬에서 확인이 필요하다.
+(`MockPgServerTest`/`OrderStatusTest`/`PaymentStatusTest`)까지만 로컬에서 실측 검증했다.
+Testcontainers 기반 통합 테스트는 CI(ubuntu-latest, Docker 내장)에서 실제로 2건 잡아냈다
+(아래 4, 5번) — 로컬 컴파일만으로는 못 잡는 런타임 전용 버그였다.
 
 ---
 
@@ -84,3 +85,53 @@ import하는 곳은 0건이었다 — 전부 `common/` 포트 인터페이스로
 
 **영향 범위**: Boot 플러그인 없이 Jackson을 직접 쓰는 모듈(지금은 `mock-pg-server`만 해당)
 한정. 향후 같은 성격의 모듈을 추가할 때 재발 가능성 높음 — 이 문서를 먼저 확인할 것.
+
+---
+
+### 4. AspectJ 포인트컷 문자열에 박힌 전체 클래스 경로는 컴파일러가 못 잡는다
+
+**증상**: CI `build-test`(order-service)에서 `QuietFailureRegressionTest`의
+`aop_어드바이스가_실제로_프록시를_가로챈다()`가 `expected: 1, but was: 0`로 실패.
+
+**원인**: 이 테스트를 `org.example.cs_study`에서 `org.example.cs_study.order`로 옮기면서
+`package` 선언은 IDE/도구로 쉽게 바꿨지만, 내부 `CountingAspect`의
+`@Around("execution(* org.example.cs_study.QuietFailureRegressionTest.AopTarget.ping(..))")`
+포인트컷 표현식 안에 있던 전체 클래스 경로는 **문자열**이라 컴파일러가 못 잡는다. 포인트컷이
+실제(이동 후) 클래스와 매치되지 않아 어드바이스가 전혀 안 걸렸는데도 빌드는 조용히 성공했다.
+
+**해결**: 포인트컷 문자열을 `org.example.cs_study.order.QuietFailureRegressionTest...`로
+수정. 같은 패턴(전체 패키지 경로를 문자열로 참조)이 더 있는지 저장소 전체를 검색해 확인했고,
+`scanBasePackages`/`IdempotencyAspect`의 `@annotation(...)` 등 나머지는 전부 올바른 경로였다.
+
+**영향 범위**: 패키지 이동이 껴 있는 리팩터링 전반. 이런 문자열 리터럴은 `git mv` +
+`package` 선언 일괄 치환으로는 절대 안 잡힌다 — 이동할 때마다
+`org\.example\.cs_study\.` 문자열 검색을 습관화할 것.
+
+---
+
+### 5. `@SpringBootApplication(scanBasePackages=...)`는 `@EnableJpaRepositories`/`@EntityScan`엔 적용되지 않는다
+
+**증상**: CI `build-test`(payment-service)에서 `PaymentIdempotencyConcurrencyTest`/
+`PaymentIdempotencyRedisDownTest`(둘 다 `@SpringBootTest`) 컨텍스트 로딩이
+`NoSuchBeanDefinitionException: ... IdempotencyRecordRepository`로 실패.
+
+**원인**: `PaymentServiceApplication`은 `org.example.cs_study.payment` 패키지에 있고,
+`@SpringBootApplication(scanBasePackages = {"...payment", "...common"})`로 컴포넌트 스캔
+범위를 넓혀뒀다. 하지만 Spring Data JPA의 `@EnableJpaRepositories`(및 `@EntityScan`) 자동
+설정은 `scanBasePackages`가 아니라 **메인 애플리케이션 클래스의 패키지**(`AutoConfigurationPackages`)
+를 기본 스캔 범위로 쓴다 — 서로 다른 메커니즘이다. `common-idempotency`의
+`IdempotencyRecord`(엔티티)/`IdempotencyRecordRepository`가 `org.example.cs_study.common`에
+있어 이 기본 범위 밖이었고, 조용히 빈 등록에서 빠졌다.
+
+**해결**: `PaymentServiceApplication`에 `@EnableJpaRepositories(basePackages = {...})`와
+`@EntityScan(basePackages = {...})`을 명시적으로 추가해 `payment`/`common` 둘 다 포함시켰다.
+
+**부수 발견**: Boot 4에서 `@EntityScan`의 패키지가
+`org.springframework.boot.autoconfigure.domain`에서
+`org.springframework.boot.persistence.autoconfigure`로 이동했다(자동설정이 기능별 모듈로
+쪼개진 결과 — 앞선 3번 Jackson 건과 같은 계열의 변화).
+
+**영향 범위**: 지금은 `payment-service`(← `common-idempotency`)만 해당. 앞으로 어떤
+서비스든 자신의 패키지 밖(`common-*`)에 있는 `@Entity`/`@Repository`를 쓰게 되면 똑같이
+재발한다 — 새 서비스 Application 클래스를 만들 때마다 확인할 것. `compileJava`로는 절대
+못 잡는다(런타임 컨텍스트 로딩 시점 오류), CI의 `@SpringBootTest`가 유일한 방어선이었다.
