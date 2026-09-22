@@ -1,8 +1,7 @@
 spring:
   datasource:
-    # 2.1: 아직 payment-service만의 DB로 분리되지 않은 과도기 상태 — 모놀리식 시절과 같은
-    # payment_lab_dev를 공유한다. 실제 분리는 2.2(서비스별 DB 분리)에서 진행.
-    url: jdbc:postgresql://localhost:5432/payment_lab_dev
+    # 2.2: payment-service 전용 DB (docker-compose.yml의 postgres-payment, 호스트 포트 5433).
+    url: jdbc:postgresql://localhost:5433/payment_lab_payment
     username: ${DB_USERNAME:cs}
     password: ${DB_PASSWORD:cs123}
     hikari:

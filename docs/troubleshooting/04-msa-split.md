@@ -269,3 +269,35 @@ Docker 없이 로컬에서 원인을 확정하려고, `common-idempotency`에 H2
 **교훈**: `@SpringBootTest`에 중첩 `@Component` 픽스처를 쓸 때 "같은 패키지니까 컴포넌트
 스캔이 찾아주겠지"라고 가정하면 안 된다 — `src/test`의 클래스는 기본적으로 스캔 제외 대상이다.
 컨텍스트에 넣고 싶은 테스트 전용 빈은 항상 `classes=`(또는 `@Import`)에 명시적으로 올려야 한다.
+
+### 10. 서비스별 DB 분리 (2.2) — 공유 Flyway 이력 리스크를 근본 해결
+
+§6에서 지적된 "3개 서비스가 완전히 동일한 Flyway 마이그레이션을 공유 이력으로 실행" 문제를
+진짜 해법(서비스별 DB 분리)으로 해소했다. README 방침대로 Order/Payment는 각자 별도 DB,
+Inventory/Notification은 같은 DB를 공유하는 구조로 갔다.
+
+**변경 내용**:
+- `docker-compose.yml`의 단일 `postgres` 서비스를 `postgres-order`(5432) /
+  `postgres-payment`(5433) / `postgres-inventory`(5434) 3개로 분리. 16GB RAM 예산 안에서
+  `max_connections`/`shared_buffers`를 줄여 인스턴스 3개를 유지했다(부록 B).
+- 각 서비스 `application-dev.yml`의 datasource URL을 각자 DB로 갱신.
+- Flyway `V2__domain_schema.sql`을 서비스별 실제 소유 테이블만 남기도록 분리:
+  - `order-service`: `orders` + `outbox`(Order Service가 Saga 오케스트레이터 겸 이벤트 발행자)
+  - `payment-service`: `payments` + `idempotency_keys`(`common-idempotency`의 유일한 현재
+    소비자) + `outbox`
+  - `inventory-service`: `products` + `inventory` + `outbox`
+  - `notification-service`는 아직 JPA 엔티티가 없어(Explore 확인) datasource 자체를 붙이지
+    않았다 — 엔티티가 생기는 시점에 `postgres-inventory`를 공유하도록 연결할 예정.
+- 서비스 코드(order/payment/inventory 각 모듈)에 다른 도메인 패키지 import가 없음을
+  재확인했다 — 2.1에서 이미 크로스 도메인 결합을 제거해뒀기 때문에 DB 분리 자체는 순수하게
+  마이그레이션/설정 변경만으로 끝났다.
+
+**§6 대안 재평가**: §6에서 기각했던 두 대안("서비스별 `flyway.table` 분리", "일부 서비스
+Flyway 비활성화")이 지금은 필요 없어졌다 — 애초에 DB가 물리적으로 분리되니 `flyway_schema_history`
+자체가 서비스마다 자연스럽게 독립된다. 공유 이력 문제는 "고치는" 게 아니라 전제 자체가
+사라지며 해소됐다.
+
+**Testcontainers 테스트 영향 없음**: `PaymentIdempotency*Test`/`InventoryConcurrencyTest`/
+`ProductCacheStampedeTest` 등은 이미 각자 독립된 Testcontainers Postgres를 띄워 자기 모듈의
+`classpath:db/migration`만 적용받는 구조라(2.1 시점부터) 이번 분리로 테스트 코드 변경은
+필요 없었다 — 마이그레이션 파일 내용만 좁아졌다.

@@ -1,21 +1,68 @@
 services:
-  postgres:
+  # 2.2: 서비스별 DB 분리 (README 방침 — Order/Payment는 각자 별도 DB, Inventory/Notification은
+  # 같은 DB를 공유). 로컬 16GB RAM 예산 안에서 인스턴스 3개를 유지하려고 max_connections/
+  # shared_buffers를 줄였다(부록 B, saga 프로파일 "PG 2인스턴스(+)"에 맞춘 추가 배치).
+  postgres-order:
     image: postgres:16-alpine
-    container_name: payment-lab-postgres
+    container_name: payment-lab-postgres-order
     environment:
-      POSTGRES_DB: payment_lab_dev
+      POSTGRES_DB: payment_lab_order
       POSTGRES_USER: cs
       POSTGRES_PASSWORD: cs123
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-    mem_limit: 1g
+      - postgres_order_data:/var/lib/postgresql/data
+    mem_limit: 512m
     command: >
-      postgres -c max_connections=200 
-               -c shared_buffers=256MB
+      postgres -c max_connections=100
+               -c shared_buffers=128MB
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U cs -d payment_lab_dev"]
+      test: ["CMD-SHELL", "pg_isready -U cs -d payment_lab_order"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  postgres-payment:
+    image: postgres:16-alpine
+    container_name: payment-lab-postgres-payment
+    environment:
+      POSTGRES_DB: payment_lab_payment
+      POSTGRES_USER: cs
+      POSTGRES_PASSWORD: cs123
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_payment_data:/var/lib/postgresql/data
+    mem_limit: 512m
+    command: >
+      postgres -c max_connections=100
+               -c shared_buffers=128MB
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cs -d payment_lab_payment"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # inventory-service 전용이지만, README 방침상 notification-service가 엔티티를 갖게 되면
+  # 같은 인스턴스(같은 DB)를 공유한다 — 지금은 notification-service에 엔티티가 없어 접속하지 않는다.
+  postgres-inventory:
+    image: postgres:16-alpine
+    container_name: payment-lab-postgres-inventory
+    environment:
+      POSTGRES_DB: payment_lab_inventory
+      POSTGRES_USER: cs
+      POSTGRES_PASSWORD: cs123
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_inventory_data:/var/lib/postgresql/data
+    mem_limit: 512m
+    command: >
+      postgres -c max_connections=100
+               -c shared_buffers=128MB
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cs -d payment_lab_inventory"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -32,4 +79,6 @@ services:
       retries: 5
 
 volumes:
-  postgres_data:
+  postgres_order_data:
+  postgres_payment_data:
+  postgres_inventory_data:
