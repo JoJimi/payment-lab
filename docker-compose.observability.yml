@@ -1,8 +1,10 @@
 # 1.18 — 부록 B `perf` 프로파일용 추가 구성. 기본 `docker-compose.yml`(Postgres/Redis)과
 # 함께 켠다: docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
 #
-# 앱과 Mock PG는 컨테이너 밖(호스트)에서 ./gradlew bootRun / mockPgRun으로 띄운다 —
-# Prometheus가 host.docker.internal로 스크레이프한다.
+# 2.1: 앱은 4개 서비스(order/payment/inventory/notification-service)로 분리됐다.
+# 각각 호스트에서 ./gradlew :<module>:bootRun 으로, Mock PG는 ./gradlew :mock-pg-server:run
+# 으로 띄운다 — Prometheus가 host.docker.internal로 서비스별 포트를 스크레이프한다
+# (observability/prometheus/prometheus.yml 참고).
 services:
   prometheus:
     image: prom/prometheus:v3.0.1

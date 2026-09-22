@@ -138,9 +138,9 @@ ES + Kibana, Prometheus + Grafana, AI Agent(RAG)는 특정 서비스에 속하�
 | 단계 | 내용 | 아키텍처 | 상태 |
 |---|---|---|---|
 | **0** | 기반 세팅 (Gradle, Flyway, Testcontainers, 구조화 로깅) | 모놀리식 | ✅ 완료 |
-| **R** | 리포지토리 + CI 파이프라인 (SAST/SCA/CodeRabbit) | 모놀리식 | 진행 예정 |
-| **1** | 모놀리식 결제 코어 (멱등성, DB 락, 캐싱) | 모놀리식 | |
-| **2** | **MSA 전환** + Kafka Saga (Outbox, 보상 트랜잭션) | MSA (4개 서비스) | |
+| **R** | 리포지토리 + CI 파이프라인 (SAST/SCA/CodeRabbit) | 모놀리식 | ✅ 완료 |
+| **1** | 모놀리식 결제 코어 (멱등성, DB 락, 캐싱) | 모놀리식 | ✅ 완료 |
+| **2** | **MSA 전환** + Kafka Saga (Outbox, 보상 트랜잭션) | MSA (4개 서비스) | 🚧 진행 중 (2-A) |
 | **3** | Resilience4j 방어 로직 + k6 성능 검증 | MSA | |
 | **4** | ELK 스택 + RAG/Agent | MSA + 관측 레이어 | |
 | **5** | Kubernetes 배포 + CD 파이프라인 | K8s | |

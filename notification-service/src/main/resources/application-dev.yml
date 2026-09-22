@@ -1,0 +1,10 @@
+logging:
+  structured:
+    format:
+      file: ecs
+    ecs:
+      service:
+        name: notification-service
+        environment: dev
+  file:
+    name: logs/notification-service.json

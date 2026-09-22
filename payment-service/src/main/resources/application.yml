@@ -1,0 +1,84 @@
+spring:
+  application:
+    name: payment-service
+
+  profiles:
+    active: dev
+
+  datasource:
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+        default_batch_fetch_size: 100
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+
+  data:
+    redis:
+      timeout: 3000
+      repositories:
+        enabled: false
+
+# 1.5: 별도 프로세스로 기동하는 Mock PG (mock-pg-server 모듈). 3단계에서 Resilience4j 인스턴스명
+# mockPg와 맞물리므로 이름을 미리 고정해둔다.
+mockpg:
+  base-url: http://localhost:8090
+
+server:
+  port: 8082
+  shutdown: graceful
+
+spring.lifecycle:
+  timeout-per-shutdown-phase: 20s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus,metrics
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+      percentiles:
+        http.server.requests: 0.5,0.95,0.99
+  tracing:
+    sampling:
+      probability: 1.0
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      mockPg:
+        # false: 서킷 OPEN이 /actuator/health를 DOWN으로 만들지 않게 한다.
+        # 5단계 readiness probe에서 외부 장애 때 파드가 빠지는 걸 방지 (3단계 목표와 반대 방향).
+        register-health-indicator: false
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+
+  retry:
+    instances:
+      mockPg:
+        max-attempts: 3
+        wait-duration: 500ms
+
+  timelimiter:
+    instances:
+      mockPg:
+        timeout-duration: 3s
+
+logging:
+  level:
+    root: INFO
+    org.example: DEBUG
