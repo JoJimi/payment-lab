@@ -131,6 +131,7 @@ org.springframework.boot:spring-boot-jdbc-test:4.1.1=testCompileClasspath,testRu
 org.springframework.boot:spring-boot-jdbc:4.1.1=compileClasspath,productionRuntimeClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
 org.springframework.boot:spring-boot-jpa-test:4.1.1=testCompileClasspath,testRuntimeClasspath
 org.springframework.boot:spring-boot-jpa:4.1.1=compileClasspath,productionRuntimeClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
+org.springframework.boot:spring-boot-kafka:4.1.1=productionRuntimeClasspath,runtimeClasspath,testRuntimeClasspath
 org.springframework.boot:spring-boot-micrometer-metrics:4.1.1=compileClasspath,productionRuntimeClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
 org.springframework.boot:spring-boot-micrometer-observation:4.1.1=compileClasspath,productionRuntimeClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
 org.springframework.boot:spring-boot-micrometer-tracing-brave:4.1.1=compileClasspath,productionRuntimeClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath

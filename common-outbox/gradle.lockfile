@@ -128,6 +128,7 @@ org.springframework.boot:spring-boot-jdbc-test:4.1.1=testCompileClasspath,testRu
 org.springframework.boot:spring-boot-jdbc:4.1.1=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
 org.springframework.boot:spring-boot-jpa-test:4.1.1=testCompileClasspath,testRuntimeClasspath
 org.springframework.boot:spring-boot-jpa:4.1.1=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
+org.springframework.boot:spring-boot-kafka:4.1.1=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
 org.springframework.boot:spring-boot-persistence:4.1.1=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
 org.springframework.boot:spring-boot-sql:4.1.1=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
 org.springframework.boot:spring-boot-starter-data-jpa-test:4.1.1=testCompileClasspath,testRuntimeClasspath

@@ -6,6 +6,10 @@ dependencies {
     implementation(project(":common-event"))
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")
     implementation("org.springframework.kafka:spring-kafka")
+    // spring-kafka 자체는 Boot 비의존 라이브러리라 이것만으로는 KafkaProperties/자동구성이
+    // 안 생긴다. Boot 4는 Kafka 자동구성을 별도 모듈로 쪼개놨다(spring-boot-autoconfigure
+    // 모놀리식 jar에서 분리) — CI에서 실측: 이거 없이는 KafkaTemplate 빈 자체가 안 만들어짐.
+    implementation("org.springframework.boot:spring-boot-kafka")
     implementation("org.springframework.boot:spring-boot-starter-json")
 
     // ---- Test ----
