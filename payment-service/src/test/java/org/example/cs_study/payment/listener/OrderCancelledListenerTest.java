@@ -121,6 +121,31 @@ class OrderCancelledListenerTest {
         assertThat(unchanged.getStatus()).isEqualTo(PaymentStatus.FAILED);
     }
 
+    @Test
+    void order_cancelled가_서로_다른_eventId로_중복_발행돼도_안전하다() {
+        // 2.14: InboxService는 eventId가 같은 재전달만 막는다 — order-service가 같은
+        // orderId에 대해 order.cancelled를 서로 다른 eventId로 두 번 발행하는 상황(예: 버그로
+        // 인한 중복 발행)까지 흡수하는지 확인한다. PaymentService#cancelForOrder는 APPROVED만
+        // 걸러 취소하므로, 첫 처리 후 결제가 CANCELLED가 되면 두 번째 처리는 자연히 no-op다.
+        Long orderId = 779L;
+        Payment payment = new Payment(orderId, UUID.randomUUID().toString(), new BigDecimal("1000.0000"), "KRW");
+        payment.approve("tx-cancel-2");
+        payment = paymentRepository.save(payment);
+        Long paymentId = payment.getId();
+
+        publish(orderId, "OUT_OF_STOCK");
+        awaitPaymentStatus(paymentId, PaymentStatus.CANCELLED);
+
+        publish(orderId, "OUT_OF_STOCK");
+
+        // 두 번째 발행이 예외 없이 처리되고 상태가 CANCELLED로 그대로 유지되는지 확인한다 —
+        // Payment.cancel()은 APPROVED에서만 허용되는 전이라, 필터링 없이 다시 불렀다면
+        // InvalidStateTransitionException으로 리스너가 죽었을 것이다.
+        sleep(Duration.ofSeconds(2));
+        Payment stillCancelled = paymentRepository.findById(paymentId).orElseThrow();
+        assertThat(stillCancelled.getStatus()).isEqualTo(PaymentStatus.CANCELLED);
+    }
+
     private void sleep(Duration duration) {
         try {
             Thread.sleep(duration.toMillis());

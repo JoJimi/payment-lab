@@ -180,3 +180,42 @@ PG)가 필요해 이 원격 환경(Docker 없음)에서는 못 돌렸다. 컴파
 추가하지 않아(기존 `SagaStatus`/`SagaStepStatus`/`PaymentStatus` 전이 규칙을 그대로 씀)
 2.11의 순수 단위 테스트(`SagaStatusTest`/`SagaStepStatusTest`/`SagaInstanceTest`/
 `SagaStepTest`)를 로컬에서 재실행해 회귀가 없음을 확인했다.
+
+### 4. 보상 자체의 멱등성 (2.14)
+
+**왜 필요한가 — `InboxService`만으로는 안 막히는 중복이 있다**: `InboxService`는
+`eventId`가 같은 재전달(Kafka at-least-once)만 막는다. `payment.failed`/`inventory.failed`가
+버그나 재시도 로직으로 서로 다른 `eventId`를 달고 같은 주문에 대해 두 번 발행되면, 두 번째
+호출도 "새 이벤트"로 보여 `InboxService`를 그냥 통과한다 — 그 상태에서 이미 `FAILED`/
+`COMPENSATED`인 스텝에 `fail()`/`compensate()`를 다시 부르면 `InvalidStateTransitionException`이
+난다(PR #63에서 CodeRabbit이 지적했고, "2.14에서 처리하겠다"고 답했던 항목).
+
+**두 겹 방어를 뒀다**:
+1. **상태 가드(응용 계층)** — `PaymentFailedListener`/`InventoryFailedListener`가 스텝을
+   건드리기 전에 `sagaInstance.getStatus() != SagaStatus.STARTED`면 곧장 반환한다. 이
+   Saga가 이미 보상 중이거나 끝났다는 뜻이므로 더 할 일이 없다. 두 트랜잭션이 동시에
+   같은 행을 읽어 둘 다 이 가드를 통과하는 진짜 경합까지는 못 막는다(같은 트랜잭션 안의
+   읽기-쓰기라 DB 커밋 순서에 달렸다) — 그건 2번이 막는다.
+2. **낙관적 락(DB 계층)** — `saga_instance`/`saga_step`에 `version` 컬럼을 추가하고 JPA
+   `@Version`으로 관리한다(`Inventory.version`, 1.11과 같은 패턴). 위 경합이 실제로
+   일어나면 나중에 커밋하는 트랜잭션이 `OptimisticLockingFailureException`으로 실패한다
+   — `InboxService`가 같은 트랜잭션에서 `processed_event` INSERT까지 롤백시키므로, 그
+   이벤트는 "처리 안 됨"으로 남아 Kafka가 재전달한다. 다음 시도에서는 이미 갱신된
+   상태를 보고 1번 가드가 정상적으로 걸러낸다.
+
+**PR #63에서 CodeRabbit이 지적했던 두 번째 항목(`@Version` 자체)을 왜 그때는 반려하고
+지금 추가했나**: 2.11 시점엔 실제 동시 쓰기 주체가 없었다(리스너 자체가 없었으므로).
+2.13에서 여러 Kafka 리스너가 같은 `saga_id` 행을 건드리게 된 지금이 "필요해지면 추가한다"던
+그 시점이다.
+
+**`payment-service`의 `PaymentService.cancelForOrder()`는 왜 추가 조치가 필요 없었나**:
+2.13에서 이미 APPROVED 상태만 걸러 취소하도록 만들어뒀다(`Payment.cancel()`이 APPROVED에서만
+허용되는 전이라는 도메인 규칙을 그대로 이용) — 같은 주문에 대해 `order.cancelled`가 몇 번
+오든, 처음 한 번만 실제로 상태가 바뀌고 그 다음부터는 필터에 걸려 자연히 no-op다. 별도
+가드나 낙관적 락을 추가하지 않았다.
+
+**로컬에서 실제로 검증한 것**: `SagaListenersIntegrationTest`에 `payment.failed`를 서로
+다른 `eventId`로 두 번 발행하는 테스트를, `OrderCancelledListenerTest`에 `order.cancelled`를
+두 번 발행하는 테스트를 추가했다 — 둘 다 Docker가 필요해 이 원격 환경에서는 못 돌렸다.
+컴파일과 2.11의 순수 단위 테스트(도메인 상태 전이 규칙 — `@Version` 추가는 전이 규칙 자체를
+바꾸지 않는다) 재실행으로 회귀가 없음을 확인했다.

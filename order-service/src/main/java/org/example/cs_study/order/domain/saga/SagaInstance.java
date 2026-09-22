@@ -8,6 +8,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.PreUpdate;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 import java.time.Instant;
 import java.util.UUID;
 import lombok.AccessLevel;
@@ -53,6 +54,17 @@ public class SagaInstance {
 
     @Column(name = "timeout_at", nullable = false)
     private Instant timeoutAt;
+
+    /**
+     * 낙관적 락(2.14) — 2.13에서 여러 Kafka 리스너(정상/보상 양쪽)가 같은 sagaId 행을
+     * 건드리게 됐다. 같은 이벤트가 서로 다른 eventId로 중복 발행되면(예: inventory-service가
+     * 버그로 {@code inventory.failed}를 두 번 쏘는 경우) {@code InboxService}의 eventId
+     * 기반 중복 방지를 우회한다 — 두 트랜잭션이 이 행을 동시에 읽어 둘 다 STARTED로 보고
+     * 진행하면 그중 하나가 여기서 걸린다. inventory-service의 {@code Inventory.version}(1.11)과
+     * 같은 패턴.
+     */
+    @Version
+    private Long version;
 
     /**
      * @param timeoutAt 이 시각을 넘겨도 STARTED에 머무르면 2.15 스케줄러가 회수 대상으로 본다.

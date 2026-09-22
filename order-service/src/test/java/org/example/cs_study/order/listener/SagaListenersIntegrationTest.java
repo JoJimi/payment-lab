@@ -167,6 +167,36 @@ class SagaListenersIntegrationTest {
     }
 
     @Test
+    void payment_failed가_서로_다른_eventId로_중복_발행돼도_안전하다() {
+        // 2.14: InboxService는 eventId가 같은 재전달만 막는다 — 같은 orderId에 대해
+        // payment.failed가 서로 다른 eventId로 두 번 발행되는 상황(예: payment-service의
+        // 버그로 인한 중복 발행)까지 리스너 자체가 흡수하는지 확인한다. publish()가 매번
+        // EventEnvelopeFactory로 새 eventId를 만들어주므로 이 두 번의 publish는 서로 다른
+        // eventId를 갖는다 — InboxService의 중복 방지로는 못 막고, PaymentFailedListener의
+        // 자체 상태 가드(sagaInstance.status != STARTED면 무시)가 막아야 한다.
+        OrderResponse order = orderService.createOrder(new CreateOrderRequest(23L, 1, new BigDecimal("1000.0000"), "KRW"));
+        SagaInstance sagaInstance = sagaInstanceRepository.findByOrderId(order.id()).orElseThrow();
+
+        PaymentFailedPayload payload =
+                new PaymentFailedPayload(order.id(), 112L, new BigDecimal("1000.0000"), "KRW", "INSUFFICIENT_FUNDS");
+        publish("payment.failed", order.id().toString(), EventType.PAYMENT_FAILED, payload);
+
+        awaitOrderStatus(order.id(), OrderStatus.CANCELLED);
+        awaitSagaStatus(sagaInstance.getSagaId(), SagaStatus.COMPLETED);
+        assertNotificationRequestedPublished(order.id());
+
+        publish("payment.failed", order.id().toString(), EventType.PAYMENT_FAILED, payload);
+
+        // 가드에 걸려 조용히 무시되는지, 예외 없이 상태가 그대로인지 확인한다 — 가드가 없다면
+        // 이미 FAILED인 PAYMENT 스텝에 fail()을 다시 불러 InvalidStateTransitionException으로
+        // 리스너가 죽었을 것이다.
+        sleep(Duration.ofSeconds(2));
+        assertThat(orderRepository.findById(order.id()).orElseThrow().getStatus()).isEqualTo(OrderStatus.CANCELLED);
+        assertThat(sagaInstanceRepository.findById(sagaInstance.getSagaId()).orElseThrow().getStatus())
+                .isEqualTo(SagaStatus.COMPLETED);
+    }
+
+    @Test
     void inventory_failed를_받으면_결제_스텝을_보상대상으로_표시하고_주문을_취소한다() {
         OrderResponse order = orderService.createOrder(new CreateOrderRequest(22L, 5, new BigDecimal("500.0000"), "KRW"));
         SagaInstance sagaInstance = sagaInstanceRepository.findByOrderId(order.id()).orElseThrow();
@@ -261,6 +291,15 @@ class SagaListenersIntegrationTest {
                 .map(SagaInstance::getStatus)
                 .filter(expected::equals)
                 .isPresent(), "sagaId=" + sagaId + "의 status가 " + expected + "가 되지 않았습니다");
+    }
+
+    private void sleep(Duration duration) {
+        try {
+            Thread.sleep(duration.toMillis());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(e);
+        }
     }
 
     private void awaitTrue(java.util.function.BooleanSupplier condition, String failureMessage) {
