@@ -1,6 +1,7 @@
 package org.example.cs_study.common.outbox;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.math.BigDecimal;
 import java.util.List;
@@ -13,6 +14,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.transaction.IllegalTransactionStateException;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -71,11 +73,14 @@ class OutboxServiceIntegrationTest {
 
     @Test
     void save하면_PENDING_상태로_봉투_전체가_직렬화돼_적재된다() {
-        outboxService.save(
+        TransactionTemplate transactionTemplate = new TransactionTemplate(transactionManager);
+
+        // save()가 Propagation.MANDATORY라 활성 트랜잭션 안에서 호출해야 한다(CodeRabbit PR #59 리뷰).
+        transactionTemplate.executeWithoutResult(status -> outboxService.save(
                 EventType.ORDER_CREATED,
                 "Order",
                 "1",
-                new OrderCreatedPayload(1L, 10L, 2, new BigDecimal("10000.0000"), "KRW"));
+                new OrderCreatedPayload(1L, 10L, 2, new BigDecimal("10000.0000"), "KRW")));
 
         List<OutboxEvent> events = outboxEventRepository.findAll();
         assertThat(events).hasSize(1);
@@ -90,6 +95,37 @@ class OutboxServiceIntegrationTest {
                 .as("payload 컬럼에는 EventEnvelope 전체(eventId/traceId 포함)가 직렬화돼 들어간다")
                 .contains("\"eventType\":\"order.created\"")
                 .contains("\"orderId\":1");
+    }
+
+    @Test
+    void 활성_트랜잭션_없이_호출하면_즉시_실패한다() {
+        assertThatThrownBy(() -> outboxService.save(
+                        EventType.ORDER_CREATED,
+                        "Order",
+                        "99",
+                        new OrderCreatedPayload(99L, 10L, 1, new BigDecimal("1000.0000"), "KRW")))
+                .as("Propagation.MANDATORY — outbox insert가 자기만의 트랜잭션으로 따로 커밋되는 걸(호출자 저장과 분리) 조용히 허용하면 안 됨")
+                .isInstanceOf(IllegalTransactionStateException.class);
+
+        assertThat(outboxEventRepository.findAll()).isEmpty();
+    }
+
+    @Test
+    void 긴_페이로드도_255자_제한_없이_정상_저장된다() {
+        TransactionTemplate transactionTemplate = new TransactionTemplate(transactionManager);
+        // currency에 일부러 긴 문자열을 넣어 봉투 전체 직렬화 결과가 255자를 확실히 넘게 만든다
+        // (payload 컬럼이 TEXT가 아니라 기본 길이(255)로 매핑되면 이 저장이 실패해야 함 —
+        // CodeRabbit PR #59 리뷰).
+        String longCurrencyForTest = "K".repeat(300);
+
+        transactionTemplate.executeWithoutResult(status -> outboxService.save(
+                EventType.ORDER_CREATED,
+                "Order",
+                "3",
+                new OrderCreatedPayload(3L, 10L, 1, new BigDecimal("1000.0000"), longCurrencyForTest)));
+
+        OutboxEvent event = outboxEventRepository.findAll().get(0);
+        assertThat(event.getPayload().length()).isGreaterThan(255);
     }
 
     @Test

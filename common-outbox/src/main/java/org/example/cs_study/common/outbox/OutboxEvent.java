@@ -39,7 +39,10 @@ public class OutboxEvent {
     @Column(name = "event_type", nullable = false, length = 100)
     private String eventType;
 
-    @Column(nullable = false)
+    // 실제 컬럼은 2.2 Flyway 마이그레이션에서 TEXT로 만들었다 — columnDefinition 없이 두면
+    // Hibernate가 기본 길이(255)로 인식해, ddl-auto=create류로 스키마를 새로 만드는 테스트에서
+    // EventEnvelope 직렬화 결과(eventId+traceId+payload 전부)가 255자를 넘는 순간 깨진다.
+    @Column(nullable = false, columnDefinition = "TEXT")
     private String payload;
 
     @Enumerated(EnumType.STRING)
