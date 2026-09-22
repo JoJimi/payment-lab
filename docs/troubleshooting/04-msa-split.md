@@ -384,3 +384,27 @@ order-service) 안에 그대로 남아있었다. 멀티모듈 분리 전에는 "
 **완료 기준 재확인**: 서비스 코드에 크로스 도메인 직접 호출 0건, 모듈 간 `project()` 의존 0건 —
 2.3의 DoD를 코드 변경 없이(순수 검증만으로) 충족한 상태에서, 검증 과정에서 발견한 죽은 코드를
 같은 PR에서 함께 정리했다.
+
+### 12. Kafka(KRaft) docker-compose 추가 (2.5) — 이미지 선택과 이 환경에서 못 한 검증
+
+**이미지**: `apache/kafka:3.8.0` (Apache 공식 이미지). Confluent 이미지 대신 이걸 쓴 이유는
+Zookeeper 의존성 없이 KRaft가 기본값이고, `bitnami/kafka`처럼 별도 벤더 관례를 배울 필요가
+없어서다 — 이 프로젝트의 다른 이미지들(`postgres:16-alpine`, `redis:7-alpine`)도 전부 공식/경량
+이미지를 우선했다.
+
+**단일 브로커가 브로커+컨트롤러를 겸함**: `KAFKA_PROCESS_ROLES: broker,controller`로 한 프로세스가
+두 역할을 다 한다(Zookeeper 없이). `KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:19093`이 자기 자신을
+유일한 투표자로 가리킨다 — 프로덕션이면 절대 이렇게 안 하지만(컨트롤러 합의가 무의미해짐), 로컬
+학습 환경에서 인스턴스를 여러 개 띄울 이유가 없다.
+
+**리스너를 3개로 쪼갠 이유**: `PLAINTEXT`(브로커 간 통신, `kafka:19092`), `CONTROLLER`(KRaft 합의,
+`kafka:19093`), `PLAINTEXT_HOST`(호스트 접속용, `localhost:9092`). 서비스들이 `./gradlew
+:xxx-service:bootRun`으로 컨테이너 밖(호스트)에서 직접 뜨는 구조라(2.2의 PostgreSQL과 동일 패턴),
+컨테이너 내부 이름(`kafka`)으로는 호스트에서 접속할 수 없다 — `PLAINTEXT_HOST`가 없으면 앱이
+부트스트랩조차 못 한다.
+
+**⚠️ 이 세션에서는 `docker compose up`으로 실제 기동 검증을 못 했다.** 이 원격 실행 환경에는
+Docker 데몬이 없다(`docker compose config -q`로 문법만 검증됨 — 데몬 없이도 파싱은 된다).
+Postgres/Redis 서비스들도 이전 PR에서 같은 방식(문법 검증만)으로 확인했던 것과 동일한 제약이다.
+실제 기동·토픽 생성/조회 확인은 로컬(Docker 데몬이 있는 환경)에서 필요하다 — 2.6(토픽 설계 문서)
+작업 때 실제로 토픽을 만들어보면서 함께 검증할 계획이다.

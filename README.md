@@ -20,13 +20,15 @@
 
 ## 로컬 개발 환경 설정
 
-DB 자격증명은 저장소에 평문으로 커밋하지 않습니다. 로컬에서 `docker-compose.yml`(PostgreSQL 인스턴스 3개)과 각 서비스(`application-dev.yml`)를 띄우기 전에:
+DB 자격증명은 저장소에 평문으로 커밋하지 않습니다. 로컬에서 `docker-compose.yml`(PostgreSQL 인스턴스 3개 + Redis + Kafka)과 각 서비스(`application-dev.yml`)를 띄우기 전에:
 
 ```bash
 cp .env.example .env             # 복사한 뒤 DB_USERNAME/DB_PASSWORD를 본인 로컬 값으로 채울 것
 set -a && source ./.env && set +a   # 서비스(./gradlew :order-service:bootRun 등)를 직접 띄울 때 필요
-docker compose up -d             # PostgreSQL 3개 + Redis
+docker compose up -d             # PostgreSQL 3개 + Redis + Kafka(KRaft 단일 브로커)
 ```
+
+Kafka는 호스트에서 `localhost:9092`로 접속합니다(서비스들도 컨테이너 밖에서 직접 뜨는 구조라 다른 인프라와 동일하게 호스트 포트를 씁니다).
 
 `.env`는 `.gitignore`에 등록돼 있어 커밋되지 않습니다. 자세한 내용은 `.env.example` 주석 참고.
 
