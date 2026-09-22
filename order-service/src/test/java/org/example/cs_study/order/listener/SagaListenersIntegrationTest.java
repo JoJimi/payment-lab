@@ -5,9 +5,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.UUID;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.example.cs_study.event.EventEnvelopeFactory;
 import org.example.cs_study.event.EventType;
@@ -138,16 +140,8 @@ class SagaListenersIntegrationTest {
         awaitSagaStep(sagaInstance.getSagaId(), SagaStepName.INVENTORY, SagaStepStatus.SUCCESS);
         awaitSagaCurrentStep(sagaInstance.getSagaId(), SagaStepName.NOTIFICATION);
 
-        Consumer<String, String> consumer = createConsumer();
-        try {
-            embeddedKafkaBroker.consumeFromAnEmbeddedTopic(consumer, "notification.requested");
-            ConsumerRecord<String, String> record =
-                    KafkaTestUtils.getSingleRecord(consumer, "notification.requested", Duration.ofSeconds(10));
-            assertThat(record.key()).isEqualTo(order.id().toString());
-            assertThat(record.value()).contains("\"orderId\":" + order.id());
-        } finally {
-            consumer.close();
-        }
+        ConsumerRecord<String, String> record = awaitRecord("notification.requested", order.id());
+        assertThat(record.value()).contains("\"orderId\":" + order.id());
 
         // 2.13: notification.requested가 나간 시점에 Saga가 바로 COMPLETED로 확정된다(알림
         // 전달 확인을 기다리지 않음, InventoryReservedListener Javadoc 참고).
@@ -197,24 +191,37 @@ class SagaListenersIntegrationTest {
 
         assertNotificationRequestedPublished(order.id());
 
-        Consumer<String, String> consumer = createConsumer();
-        try {
-            embeddedKafkaBroker.consumeFromAnEmbeddedTopic(consumer, "order.cancelled");
-            ConsumerRecord<String, String> record =
-                    KafkaTestUtils.getSingleRecord(consumer, "order.cancelled", Duration.ofSeconds(10));
-            assertThat(record.value()).contains("\"orderId\":" + order.id());
-        } finally {
-            consumer.close();
-        }
+        ConsumerRecord<String, String> record = awaitRecord("order.cancelled", order.id());
+        assertThat(record.value()).contains("\"orderId\":" + order.id());
     }
 
     private void assertNotificationRequestedPublished(Long orderId) {
+        ConsumerRecord<String, String> record = awaitRecord("notification.requested", orderId);
+        assertThat(record.value()).contains("\"orderId\":" + orderId).contains("ORDER_CANCELLED");
+    }
+
+    /**
+     * 세 테스트 메서드가 {@code notification.requested} 같은 토픽을 공유한다(클래스 레벨
+     * {@code @EmbeddedKafka} 브로커 하나를 재사용) — {@code KafkaTestUtils.getSingleRecord}는
+     * "정확히 레코드 1개"를 전제해서, 다른 테스트가 먼저 남긴 레코드까지 같이 잡히면
+     * {@code IllegalStateException: More than one record for topic found}로 깨진다(CI에서
+     * 실제로 겪음). 매번 새 컨슈머 그룹으로 토픽 전체를 읽어 이 테스트의 {@code orderId}와
+     * 일치하는 레코드만 골라내는 방식이라 다른 테스트의 레코드가 섞여도 안전하다.
+     */
+    private ConsumerRecord<String, String> awaitRecord(String topic, Long orderId) {
         Consumer<String, String> consumer = createConsumer();
         try {
-            embeddedKafkaBroker.consumeFromAnEmbeddedTopic(consumer, "notification.requested");
-            ConsumerRecord<String, String> record =
-                    KafkaTestUtils.getSingleRecord(consumer, "notification.requested", Duration.ofSeconds(10));
-            assertThat(record.value()).contains("\"orderId\":" + orderId).contains("ORDER_CANCELLED");
+            embeddedKafkaBroker.consumeFromAnEmbeddedTopic(consumer, topic);
+            long deadline = System.currentTimeMillis() + Duration.ofSeconds(10).toMillis();
+            while (System.currentTimeMillis() < deadline) {
+                ConsumerRecords<String, String> records = KafkaTestUtils.getRecords(consumer, Duration.ofSeconds(1));
+                for (ConsumerRecord<String, String> record : records.records(topic)) {
+                    if (orderId.toString().equals(record.key())) {
+                        return record;
+                    }
+                }
+            }
+            throw new AssertionError(topic + "에서 orderId=" + orderId + "인 레코드를 시간 내에 찾지 못했습니다");
         } finally {
             consumer.close();
         }
@@ -273,7 +280,9 @@ class SagaListenersIntegrationTest {
     }
 
     private Consumer<String, String> createConsumer() {
-        var consumerProps = KafkaTestUtils.consumerProps(embeddedKafkaBroker, "saga-listeners-test-group", true);
+        // 매 호출마다 새 컨슈머 그룹 — 여러 테스트가 같은 토픽을 공유해도 그룹 오프셋
+        // 커밋 타이밍에 서로 영향을 주지 않는다(awaitRecord Javadoc 참고).
+        var consumerProps = KafkaTestUtils.consumerProps(embeddedKafkaBroker, "saga-listeners-test-" + UUID.randomUUID(), true);
         consumerProps.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         consumerProps.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         consumerProps.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
