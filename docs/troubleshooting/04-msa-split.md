@@ -210,3 +210,25 @@ CodeRabbit이 [PR #46 리뷰](https://github.com/JoJimi/payment-lab/pull/46)에�
 **영향 범위**: `PaymentController`(`POST /api/payments`)는 지금 항상 501을 반환한다 —
 2-B 전까지는 의도된 동작이다. `common-idempotency`가 처음으로 Testcontainers(Postgres+Redis)
 의존 테스트를 갖게 돼 `gradle.lockfile` 재생성이 필요했다.
+
+### 8. `common-idempotency` 자체 테스트가 CI에서 `MeterRegistry` 빈을 못 찾아 실패했다
+
+`IdempotencyAspectConcurrencyTest`/`IdempotencyRedisDownTest`(§7에서 추가)는 최소 구성의
+`@SpringBootApplication static class TestApp {}`을 컨텍스트로 쓴다. `IdempotencyAspect`는
+생성자에서 `MeterRegistry`(1.19 커스텀 메트릭용)를 주입받는데, CI에서 두 테스트 모두
+`UnsatisfiedDependencyException: No qualifying bean of type
+'io.micrometer.core.instrument.MeterRegistry'`로 컨텍스트 로딩부터 실패했다.
+
+원인: `common-idempotency/build.gradle.kts`는 `io.micrometer:micrometer-core`(클래스만)에만
+의존한다 — `MeterRegistry` 빈을 실제로 자동 구성해주는 건 Spring Boot Actuator의 메트릭
+자동 구성(`spring-boot-starter-actuator`)이다. 지금까지 이 애스펙트가 문제없이 동작했던
+유일한 이유는 실제 소비 서비스인 `payment-service`가 `spring-boot-starter-actuator` +
+`micrometer-registry-prometheus`를 물고 있었기 때문이다(§7 전까지는 `payment-service`의
+`@SpringBootTest`들이 유일한 통합 테스트였다). `common-idempotency`가 처음으로 독립된
+트리비얼 테스트 앱을 갖게 되면서(§7) 이 암묵적 의존이 드러났다.
+
+수정: `common-idempotency/build.gradle.kts`의 `testImplementation`에
+`org.springframework.boot:spring-boot-starter-actuator`를 추가했다 — 실제 소비 서비스와
+동일한 방식으로 이 모듈의 테스트 컨텍스트에도 `MeterRegistry` 빈을 공급한다. 프로덕션
+`implementation` 의존성은 건드리지 않았다(이 모듈 자체는 여전히 actuator를 강제하지 않고,
+소비 서비스가 원하면 붙이는 구조를 유지).

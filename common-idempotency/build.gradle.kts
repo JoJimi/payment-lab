@@ -17,6 +17,9 @@ dependencies {
     testImplementation(platform("org.testcontainers:testcontainers-bom:2.0.5"))
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("org.springframework.boot:spring-boot-starter-data-jpa-test")
+    testImplementation("org.springframework.boot:spring-boot-starter-actuator") // IdempotencyAspect가 주입받는
+    // MeterRegistry 빈은 실제 소비 서비스(payment-service)가 물고 있는 actuator 스타터가 자동 구성해준다 —
+    // 이 모듈 자체 테스트도 같은 방식으로 빈을 공급받아야 한다.
     testImplementation("org.springframework.boot:spring-boot-testcontainers")
     testImplementation("org.testcontainers:testcontainers-junit-jupiter")
     testImplementation("org.testcontainers:testcontainers-postgresql")
