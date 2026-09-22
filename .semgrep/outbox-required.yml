@@ -16,5 +16,12 @@ rules:
     paths:
       exclude:
         - "**/common-outbox/src/main/java/org/example/cs_study/common/outbox/OutboxRelay.java"
+        # 2.12: 통합 테스트(@EmbeddedKafka)는 다른 서비스가 발행했을 법한 이벤트를 시뮬레이션
+        # 하려고 KafkaTemplate.send()를 직접 부른다(예: SagaListenersIntegrationTest가
+        # payment-service 대신 payment.completed를 흘려보냄) — 이건 Outbox가 막으려는
+        # "프로덕션 코드의 발행 원자성 우회"가 아니라 테스트 픽스처의 정상적인 역할이다.
+        - "**/src/test/**"
 
 # 2.10 완료: OutboxRelay 밖에서 KafkaTemplate.send() 직접 호출을 막는다(로드맵 부록 D-3).
+# 2.12: 테스트 코드(src/test)는 예외 범위에 추가(위 exclude 참고) — 실제 위반 코드가 아니라
+# 테스트가 협업 서비스의 발행을 시뮬레이션하는 정상적인 패턴이라 잡을 이유가 없다.
