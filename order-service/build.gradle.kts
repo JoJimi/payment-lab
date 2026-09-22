@@ -4,6 +4,7 @@ plugins {
 
 dependencies {
     implementation(project(":common-web"))
+    implementation(project(":common-outbox"))
 
     // ---- Web / 기본 ----
     implementation("org.springframework.boot:spring-boot-starter-webmvc")

@@ -138,9 +138,18 @@ public record NotificationRequestedPayload(
 발행 시점의 MDC에서 `traceId`를 읽어 봉투에 싣습니다. 컨슈머 쪽에서는
 `TraceContext.restore(traceId)`(try-with-resources)로 같은 traceId를 MDC에 복원합니다.
 
+## 구현 위치 (2.8)
+
+`common-outbox` 모듈(`OutboxService`/`OutboxRelay`)이 `outbox` 테이블(2.2에서 스켈레톤만
+만들어둠)에 이 페이로드들을 넣고 폴링해서 Kafka로 발행합니다. `OutboxService.save()`가
+호출자의 트랜잭션에 그대로 올라타 비즈니스 저장과 이벤트 적재를 원자적으로 묶고,
+`OutboxRelay`가 유일하게 `KafkaTemplate.send()`를 호출하는 지점입니다(2.10의 Semgrep 룰이
+이 클래스만 예외로 허용할 예정). 상세 설계 근거는
+[troubleshooting/04-msa-split.md §13](../troubleshooting/04-msa-split.md)에 있습니다.
+
 ## 다음 단계
 
-- **2.8**: `outbox` 테이블(2.2에서 스켈레톤만 만들어둠)에 이 페이로드들을 넣는
-  `OutboxService`와 폴링 릴레이를 구현합니다.
 - **2.9**: 각 컨슈머 서비스에 `processed_event(event_id)` 테이블을 추가해 중복 소비를
   막습니다.
+- **2.10**: `OutboxRelay` 밖에서 `KafkaTemplate.send()`를 직접 호출하면 막는 Semgrep 룰을
+  추가합니다(부록 D-3).

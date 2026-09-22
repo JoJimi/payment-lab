@@ -408,3 +408,60 @@ Docker 데몬이 없다(`docker compose config -q`로 문법만 검증됨 — �
 Postgres/Redis 서비스들도 이전 PR에서 같은 방식(문법 검증만)으로 확인했던 것과 동일한 제약이다.
 실제 기동·토픽 생성/조회 확인은 로컬(Docker 데몬이 있는 환경)에서 필요하다 — 2.6(토픽 설계 문서)
 작업 때 실제로 토픽을 만들어보면서 함께 검증할 계획이다.
+
+### 13. Transactional Outbox 공통 구현 (2.8) — `common-outbox` 모듈, 그리고 Docker 없이 어디까지 검증했나
+
+**왜 서비스마다 따로 짜지 않고 새 모듈을 만들었나**: order/payment/inventory 셋 다 2.2에서
+동일한 `outbox` 테이블 스키마(`id`/`aggregate_type`/`aggregate_id`/`event_type`/`payload`/
+`status`/`created_at`/`published_at`)를 갖고 있다. "DB 커밋과 같은 트랜잭션에 insert, 별도
+릴레이가 폴링해서 발행"이라는 로직 자체는 세 서비스 모두 동일해서, `common-idempotency`가
+이미 증명한 패턴(도메인 중립 JPA 컴포넌트는 common 모듈로 뽑고, 그 모듈 스스로 테스트로
+증명)을 그대로 따랐다.
+
+**`payload` 컬럼에 무엇을 저장하나**: 이벤트의 실제 데이터(`OrderCreatedPayload` 등)가 아니라
+`EventEnvelope` 전체(`eventId`/`eventType`/`version`/`occurredAt`/`traceId`/`payload`)를
+JSON으로 직렬화해서 저장한다. `traceId`는 `OutboxService.save()` 호출 시점(비즈니스 로직이
+실행 중인 요청 스레드, MDC가 살아있는 시점)에만 얻을 수 있다 — `OutboxRelay`가 실제로
+발행하는 시점은 스케줄러 스레드라 MDC가 비어 있다. 그래서 캡처는 저장 시점에, 보존은
+`payload` 컬럼에 직렬화된 형태로 한다.
+
+**`OutboxService.save()`가 자기 트랜잭션을 열지 않는 이유**: 이 클래스가 존재하는 유일한
+이유가 "비즈니스 저장과 이벤트 적재를 원자적으로 묶는 것"이다. `@Transactional(REQUIRES_NEW)`를
+붙이면 호출자의 트랜잭션과 분리된 별도 트랜잭션이 열려서, 정확히 막으려던 반쪽 커밋(주문은
+저장됐는데 이벤트는 안 남거나, 그 반대)이 다시 가능해진다. 그래서 `save()`는 전파 방식을
+아예 건드리지 않고 호출자의 트랜잭션에 그대로 올라탄다 — `OutboxServiceIntegrationTest`의
+두 번째 테스트가 이걸 직접 증명한다(호출자 트랜잭션이 롤백되면 outbox row도 사라짐).
+
+**`OutboxRelay`가 유일한 발행 지점**: 클래스 이름을 로드맵 부록 D-3의 Semgrep 룰 스펙
+(`pattern-not-inside: class OutboxRelay { ... }`)에 정확히 맞췄다 — 2.10에서 이 룰을 실제로
+추가하면 코드 변경 없이 바로 맞아떨어진다. 발행은 `kafkaTemplate.send(...).get()`으로 동기
+확인한다 — ack 없이 바로 PUBLISHED로 표시하면 "표시는 됐는데 실제로는 안 나갔다"는, outbox
+패턴이 막으려는 문제가 그대로 재발한다. 실패한 행은 로그만 남기고 PENDING에 그대로 둬서
+다음 폴링(기본 1초)에서 재시도된다 — Kafka가 at-least-once라 중복 발행은 이미 예정된
+일이고, 이 중복은 2.9의 컨슈머 멱등성이 막는다.
+
+**Jackson 3 좌표 재확인**: `OutboxService`가 처음엔 `com.fasterxml.jackson.databind.ObjectMapper`
++ `JsonProcessingException` try/catch로 작성됐다가 컴파일 에러가 났다 — Boot 4/Jackson 3은
+`tools.jackson.databind.ObjectMapper`로 좌표가 바뀌었고(troubleshooting #3에서 이미 겪은
+문제), `writeValueAsString`이 던지는 예외도 `JacksonException`으로 바뀌면서 checked에서
+unchecked가 됐다(로드맵 2단계 개요의 Jackson 3 경고 그대로). `common-idempotency`의
+`IdempotencyAspect`가 이미 올바른 좌표를 쓰고 있어서 그걸 보고 고쳤다 — try/catch 없이
+그냥 던지게 뒀다(직렬화 실패는 페이로드 타입 자체의 버그라 재시도로 안 풀리니, 호출자
+트랜잭션을 그대로 실패시키는 게 맞다).
+
+**order/inventory-service에 `@EnableJpaRepositories`/`@EntityScan` 추가**: `OutboxEvent`/
+`OutboxEventRepository`가 `org.example.cs_study.common.outbox` 패키지에 있는데, Boot의
+JPA 리포지토리/엔티티 스캔 기본 범위는 `@ComponentScan`의 `scanBasePackages`와 별개로
+메인 클래스 패키지 기준이다. payment-service는 2.1에서 `common-idempotency`를 붙일 때 이미
+이 문제를 겪고 고쳐뒀지만(`PaymentServiceApplication` 주석), order/inventory-service는
+지금까지 `common.*` 패키지에 JPA 엔티티를 가진 적이 없어서 그 annotation이 없었다 — 이번에
+둘 다 추가했다.
+
+**⚠️ 이 세션에서 실제로 검증한 것과 못한 것**: Docker 데몬이 없는 제약(§12와 동일)은
+`OutboxServiceIntegrationTest`(Testcontainers Postgres 필요)에도 그대로 적용돼 로컬에서
+못 돌렸다 — `./gradlew :common-outbox:compileJava :common-outbox:compileTestJava`로 컴파일만
+확인했고, 실제 실행은 CI(Docker 있음)에 맡긴다. 반면 `OutboxRelayTest`는 Kafka 부분을
+Testcontainers가 아니라 `spring-kafka-test`의 임베디드 브로커(순수 JVM 인프로세스, Docker
+불필요)로 검증하게 설계했는데, 이 테스트도 같은 클래스 안에서 Testcontainers Postgres를
+같이 쓰기 때문에 결국 Docker가 필요해 로컬에서 못 돌렸다. 전체 모듈(`compileJava`/
+`compileTestJava`)은 로컬에서 재검증했다.
