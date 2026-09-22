@@ -92,7 +92,7 @@ services:
     image: apache/kafka:3.8.0
     container_name: payment-lab-kafka
     ports:
-      - "9092:9092"
+      - "127.0.0.1:9092:9092"
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
