@@ -23,8 +23,8 @@
 DB 자격증명은 저장소에 평문으로 커밋하지 않습니다. 로컬에서 `docker-compose.yml`(PostgreSQL 인스턴스 3개)과 각 서비스(`application-dev.yml`)를 띄우기 전에:
 
 ```bash
-cp .env.example .env            # 복사한 뒤 DB_USERNAME/DB_PASSWORD를 본인 로컬 값으로 채울 것
-export $(grep -v '^#' .env | xargs)   # 서비스(./gradlew :order-service:bootRun 등)를 직접 띄울 때 필요
+cp .env.example .env             # 복사한 뒤 DB_USERNAME/DB_PASSWORD를 본인 로컬 값으로 채울 것
+set -a && source ./.env && set +a   # 서비스(./gradlew :order-service:bootRun 등)를 직접 띄울 때 필요
 docker compose up -d             # PostgreSQL 3개 + Redis
 ```
 

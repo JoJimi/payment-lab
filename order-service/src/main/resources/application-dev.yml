@@ -3,7 +3,7 @@ spring:
     # 2.2: order-service 전용 DB (docker-compose.yml의 postgres-order, 호스트 포트 5432).
     url: jdbc:postgresql://localhost:5432/payment_lab_order
     # 기본값 없이 필수로 요구한다 — 커밋된 평문 자격증명을 남기지 않기 위함.
-    # `cp .env.example .env` 후 `export $(grep -v '^#' .env | xargs)`로 셸에 내보낼 것.
+    # `cp .env.example .env` 후 `set -a && source ./.env && set +a`로 셸에 내보낼 것.
     username: ${DB_USERNAME}
     password: ${DB_PASSWORD}
     hikari:

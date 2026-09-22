@@ -313,7 +313,7 @@ DB_PASSWORD 기본값 지적(§는 없지만 PR #46 리뷰 스레드)은 "`docke
 `POSTGRES_PASSWORD`와 세 서비스 `application-dev.yml`의 `DB_USERNAME`/`DB_PASSWORD`에서
 기본값을 전부 제거했다(`${VAR:?메시지}` 형태로 필수화). `.env`는 이미 `.gitignore`에 등록돼
 있었다 — `cp .env.example .env` 후 `docker compose up`으로 컴포즈는 자동으로 읽고,
-`./gradlew bootRun`으로 서비스를 직접 띄울 때는 `export $(grep -v '^#' .env | xargs)`로
+`./gradlew bootRun`으로 서비스를 직접 띄울 때는 `set -a && source ./.env && set +a`로
 셸에 내보내야 한다(README에 기록). `docker compose config`로 필수값 누락 시 명확한 에러로
 막히는 것과 값이 있을 때 정상 파싱되는 것 둘 다 로컬에서 확인했다.
 
@@ -324,3 +324,30 @@ DB_PASSWORD 기본값 지적(§는 없지만 PR #46 리뷰 스레드)은 "`docke
 안내도 "기본값 그대로 써도 됨"에서 "본인 로컬 값을 채울 것"으로 수정했다. 빈 문자열도
 `${VAR:?메시지}` 필수 검사를 여전히 통과하지 못하는 것(셸/Compose의 `:?`는 unset뿐 아니라
 빈 값도 잡는다)을 로컬에서 재확인했다.
+
+**추가 수정 — `.env` 로딩 커맨드가 공백/따옴표 포함 값에서 깨질 수 있었던 문제**: CodeRabbit이
+README/`.env.example`/세 서비스 `application-dev.yml` 주석에 적어둔
+`export $(grep -v '^#' .env | xargs)`를 지적했다. `xargs`는 공백으로 토큰을 나누기 때문에
+값에 공백이나 따옴표가 들어있으면 `export`에 엉뚱하게 쪼개진 인자가 전달된다(지금 값은 단순
+문자열이라 실제로는 안 깨지지만, 패턴 자체가 일반적으로 안전하지 않다). `set -a && source
+./.env && set +a`로 바꿨다 — `set -a`가 이후 정의되는 모든 셸 변수를 자동 export 대상으로
+표시하므로, `.env`를 평범한 셸 스크립트처럼 `source`하는 것만으로 안전하게 값을 내보낼 수
+있다.
+
+**반려 — "이미 적용된 V2 마이그레이션을 수정하지 마라"**: 같은 리뷰에서 order/payment/inventory
+서비스의 `V2__domain_schema.sql`을 이번 PR에서 직접 수정한 것(§10)에 대해 "Flyway
+`validate-on-migrate` 기본값이 `true`라 기존에 V2를 적용받은 DB에서 체크섬 불일치로 기동이
+실패한다"는 일반 원칙을 지적했다. 이 프로젝트 맥락에서는 반려한다 — 이유:
+- 이 스키마 변경으로 영향받는 DB는 로컬 개발용 docker-compose 볼륨뿐이다. 운영 환경이나
+  공유 환경에 이미 떠 있는 DB가 없다(1인 학습 프로젝트, 아직 배포 전 — 로드맵 5단계 이전).
+- §6/§10에서 이미 분석한 것과 같은 종류의 리스크다 — "진짜 위험 구간은 전환 중간 단계"라는
+  결론도 동일하게 적용된다. 이번 PR은 그 전환을 **한 커밋 안에서 원자적으로** 끝냈다(세
+  서비스의 마이그레이션을 동시에 분리) — §6이 미리 요구해둔 조건 그대로다.
+- 기존 로컬 볼륨과 체크섬이 충돌하면 `docker compose down -v`로 초기화하고 새 인스턴스
+  구성(postgres-order/payment/inventory)으로 다시 올리면 된다 — 어차피 이번 PR에서
+  `postgres` 단일 서비스를 3개로 쪼개면서 볼륨 이름 자체가 바뀌었으므로(`postgres_data` →
+  `postgres_order_data` 등) 기존 볼륨은 애초에 새 서비스에서 재사용되지 않는다. 체크섬
+  충돌 시나리오 자체가 이 PR에서는 발생하지 않는다.
+- "기존 V2를 그대로 두고 새 버전 마이그레이션을 추가하라"는 일반 원칙은 여러 서비스가 공유하는
+  운영 DB에서나 의미가 있다. 지금은 서비스별 DB 자체가 새로 생기는 시점이라(§10) 적용할
+  "기존 V2 이력"이 없다.
