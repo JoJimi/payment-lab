@@ -99,7 +99,7 @@ jobs:
       - name: Verify lockfiles exist
         run: |
           missing=0
-          for f in common-event common-web common-idempotency mock-pg-server \
+          for f in common-event common-web common-idempotency common-outbox mock-pg-server \
                    order-service payment-service inventory-service notification-service; do
             if [ ! -f "$f/gradle.lockfile" ]; then
               echo "::error::$f/gradle.lockfile이 없습니다. ./gradlew :$f:dependencies --write-locks 결과를 커밋하세요."

@@ -20,6 +20,14 @@ spring:
       host: localhost
       port: 6379
 
+  # 2.8: outbox 릴레이(OutboxRelay)가 이 브로커로 발행한다(2.5의 docker-compose Kafka,
+  # PLAINTEXT_HOST 리스너 — 서비스가 컨테이너 밖에서 직접 뜨는 기존 패턴과 동일).
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
 management:
   endpoint:
     health:
