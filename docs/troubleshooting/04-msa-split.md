@@ -465,3 +465,43 @@ Testcontainers가 아니라 `spring-kafka-test`의 임베디드 브로커(순수
 불필요)로 검증하게 설계했는데, 이 테스트도 같은 클래스 안에서 Testcontainers Postgres를
 같이 쓰기 때문에 결국 Docker가 필요해 로컬에서 못 돌렸다. 전체 모듈(`compileJava`/
 `compileTestJava`)은 로컬에서 재검증했다.
+
+**PR #59 CodeRabbit 리뷰에서 실제로 잡힌 버그 2건**: (1) `OutboxEvent.payload`가
+`columnDefinition` 없이 기본 길이(255)로 매핑돼 있었다 — 실제 Flyway 컬럼은 TEXT지만,
+`ddl-auto=create`로 스키마를 새로 만드는 테스트에서는 `EventEnvelope` 직렬화 결과가
+255자를 넘는 순간 깨질 수 있었다. TEXT로 명시하고 255자 넘는 페이로드 테스트를 추가해
+확인했다. (2) `OutboxService.save()`가 활성 트랜잭션 없이 호출돼도 조용히 성공했다 —
+Spring Data JPA의 `save()`가 자기만의 짧은 트랜잭션을 열어 outbox row만 따로 커밋할 수
+있다는 뜻이라(호출자의 비즈니스 저장과 분리됨), 이 클래스가 막으려는 바로 그 문제가
+재발할 수 있었다. `Propagation.MANDATORY`로 그런 오용을 `IllegalTransactionStateException`
+으로 즉시 실패시키게 고쳤다. 둘 다 로컬에서 Docker 없이는 재현/검증이 불가능했던
+경로라, 이런 실제 실행 검증은 CI(또는 로컬 Docker 환경)가 필수라는 걸 다시 확인했다.
+
+### 14. 컨슈머 멱등성 (2.9) — `common-inbox` 모듈, 그리고 notification-service를 또 미룬 이유
+
+**`InboxService`가 자기 트랜잭션을 여는 이유(`OutboxService`와 반대)**: `OutboxService.save()`는
+호출자(웹 요청 핸들러)가 이미 트랜잭션을 열어둔 상태에서 불려야 해서 `Propagation.MANDATORY`를
+썼다(§13). 반대로 `InboxService.processIfNew()`는 Kafka 컨슈머 콜백의 진입점이 될 코드다 —
+Spring이 `@KafkaListener` 메서드를 자동으로 트랜잭션으로 감싸주지 않으므로, 여기서 직접
+`@Transactional`(기본 REQUIRED)을 열어야 비즈니스 처리와 `processed_event` insert가 원자적으로
+묶인다. 같은 "존재 확인 → 처리 → 기록"패턴이라도 발행 쪽과 소비 쪽은 트랜잭션 경계를 여는
+주체가 정반대라는 걸 이번에 명확히 했다.
+
+**존재 확인과 저장 사이의 TOCTOU를 그대로 둔 이유**: `existsById` 확인 후 `save()`를 부르는
+방식은 이론적으로 동시에 같은 eventId가 두 번 들어오면 둘 다 확인을 통과할 수 있다. INSERT를
+먼저 시도하고 PK 충돌을 잡아 "이미 처리됨"으로 판단하는 방식(insert-first)도 검토했지만,
+Hibernate는 flush 중 제약 위반이 나면 그 트랜잭션의 영속성 컨텍스트를 더 이상 안전하게 쓸 수
+없게 만든다 — 예외를 잡고 같은 트랜잭션 안에서 비즈니스 로직을 계속 실행하는 게 실제로는
+신뢰할 수 없다. Kafka 컨슈머 그룹에서 같은 파티션은 항상 한 인스턴스가 순차 처리하므로
+실제 동시 중복은 리밸런싱 시점의 재처리 정도라 드물다고 보고, 지금은 `existsById` 방식을
+그대로 쓴다 — `event_id`가 PK라 최악의 경우에도 두 번째 INSERT가 예외로 드러나지 조용히
+씹히지는 않는다.
+
+**notification-service는 이번에도 배선하지 않았다**: `docs/architecture/event-catalog.md`에
+따르면 notification-service도 `notification.requested`와 `order.cancelled`를 구독하는
+컨슈머라 논리적으로는 `processed_event`가 필요하다. 하지만 2.2에서 이미 결정했듯
+notification-service는 아직 영속 대상(JPA 엔티티)이 하나도 없어 DB에 접속하지 않는다 —
+멱등성 테이블 하나만을 위해 이 서비스의 첫 DB 연결(데이터소스 설정, docker-compose 접속,
+Flyway 도입)을 여는 건 실제 알림 발송 로직 없이 인프라만 미리 짓는 셈이다. 실제 알림 로직을
+구현하는 시점(2-C/2-D)에 첫 엔티티와 함께 처리하는 쪽이 맞다고 판단했다 — order/payment/
+inventory 세 서비스만 이번에 배선했다.
