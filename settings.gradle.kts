@@ -5,6 +5,7 @@ include(
     "common-web",
     "common-idempotency",
     "common-outbox",
+    "common-inbox",
     "mock-pg-server",
     "order-service",
     "payment-service",

@@ -465,3 +465,53 @@ Testcontainers가 아니라 `spring-kafka-test`의 임베디드 브로커(순수
 불필요)로 검증하게 설계했는데, 이 테스트도 같은 클래스 안에서 Testcontainers Postgres를
 같이 쓰기 때문에 결국 Docker가 필요해 로컬에서 못 돌렸다. 전체 모듈(`compileJava`/
 `compileTestJava`)은 로컬에서 재검증했다.
+
+**PR #59 CodeRabbit 리뷰에서 실제로 잡힌 버그 2건**: (1) `OutboxEvent.payload`가
+`columnDefinition` 없이 기본 길이(255)로 매핑돼 있었다 — 실제 Flyway 컬럼은 TEXT지만,
+`ddl-auto=create`로 스키마를 새로 만드는 테스트에서는 `EventEnvelope` 직렬화 결과가
+255자를 넘는 순간 깨질 수 있었다. TEXT로 명시하고 255자 넘는 페이로드 테스트를 추가해
+확인했다. (2) `OutboxService.save()`가 활성 트랜잭션 없이 호출돼도 조용히 성공했다 —
+Spring Data JPA의 `save()`가 자기만의 짧은 트랜잭션을 열어 outbox row만 따로 커밋할 수
+있다는 뜻이라(호출자의 비즈니스 저장과 분리됨), 이 클래스가 막으려는 바로 그 문제가
+재발할 수 있었다. `Propagation.MANDATORY`로 그런 오용을 `IllegalTransactionStateException`
+으로 즉시 실패시키게 고쳤다. 둘 다 로컬에서 Docker 없이는 재현/검증이 불가능했던
+경로라, 이런 실제 실행 검증은 CI(또는 로컬 Docker 환경)가 필수라는 걸 다시 확인했다.
+
+### 14. 컨슈머 멱등성 (2.9) — `common-inbox` 모듈, 그리고 notification-service를 또 미룬 이유
+
+**`InboxService`가 자기 트랜잭션을 여는 이유(`OutboxService`와 반대)**: `OutboxService.save()`는
+호출자(웹 요청 핸들러)가 이미 트랜잭션을 열어둔 상태에서 불려야 해서 `Propagation.MANDATORY`를
+썼다(§13). 반대로 `InboxService.processIfNew()`는 Kafka 컨슈머 콜백의 진입점이 될 코드다 —
+Spring이 `@KafkaListener` 메서드를 자동으로 트랜잭션으로 감싸주지 않으므로, 여기서 직접
+`@Transactional`(기본 REQUIRED)을 열어야 비즈니스 처리와 `processed_event` insert가 원자적으로
+묶인다. 같은 "존재 확인 → 처리 → 기록"패턴이라도 발행 쪽과 소비 쪽은 트랜잭션 경계를 여는
+주체가 정반대라는 걸 이번에 명확히 했다.
+
+**존재 확인과 저장 사이의 TOCTOU — 원래는 그대로 뒀다가 PR #60 리뷰에서 고쳤다**: 처음엔
+`existsById` 확인 후 `save()`를 부르는 방식이었다. Kafka 컨슈머 그룹에서 같은 파티션은
+보통 한 인스턴스가 순차 처리하니 실제 동시 중복은 드물 거라 보고, 그 좁은 창을 감수하기로
+했었다. CodeRabbit이 이 판단에 반박했다 — 리밸런싱 시점의 재처리나 재시도 타이밍에 따라
+"드묾"이 "불가능"은 아니고, 두 트랜잭션이 정말 동시에 확인을 통과하면 비즈니스 로직이
+두 번 실행된다(PK 유니크 제약은 INSERT 단계에서만 막아줄 뿐, "확인" 단계의 경쟁 자체를
+막지 못한다). 대안으로 검토했던 insert-first(INSERT 먼저 시도하고 PK 충돌을 잡아 "이미
+처리됨"으로 판단)도 Hibernate에서는 위험하다 — flush 중 제약 위반이 나면 그 트랜잭션의
+영속성 컨텍스트를 더 이상 안전하게 쓸 수 없어, 예외를 잡고 같은 트랜잭션 안에서 비즈니스
+로직을 계속 실행하는 게 신뢰할 수 없다.
+
+최종 해법은 JPA 엔티티 저장이 아니라 **네이티브 SQL로 직접 원자적 선점**하는 것이다 —
+`ProcessedEventRepository.insertIfAbsent()`가 `INSERT ... ON CONFLICT (event_id) DO NOTHING`을
+실행하고 삽입된 행 수(0 또는 1)를 반환한다. 두 트랜잭션이 동시에 불러도 DB 자체가 정확히
+하나만 통과시키므로, "확인"과 "저장" 사이에 창이 아예 없어진다. `ProcessedEvent` 엔티티는
+더 이상 `new`로 만들지 않으므로(insert가 네이티브 쿼리로 바뀌어서) 생성자와 `@PrePersist`를
+제거했다 — 남겨두면 아무도 안 부르는 죽은 코드가 된다. 동시 요청 20개로 실제 경쟁을
+재현하는 테스트(`같은_eventId로_동시에_들어와도_비즈니스_로직은_한_번만_실행된다`,
+`IdempotencyAspectConcurrencyTest`와 같은 패턴)를 추가해 확인했다.
+
+**notification-service는 이번에도 배선하지 않았다**: `docs/architecture/event-catalog.md`에
+따르면 notification-service도 `notification.requested`와 `order.cancelled`를 구독하는
+컨슈머라 논리적으로는 `processed_event`가 필요하다. 하지만 2.2에서 이미 결정했듯
+notification-service는 아직 영속 대상(JPA 엔티티)이 하나도 없어 DB에 접속하지 않는다 —
+멱등성 테이블 하나만을 위해 이 서비스의 첫 DB 연결(데이터소스 설정, docker-compose 접속,
+Flyway 도입)을 여는 건 실제 알림 발송 로직 없이 인프라만 미리 짓는 셈이다. 실제 알림 로직을
+구현하는 시점(2-C/2-D)에 첫 엔티티와 함께 처리하는 쪽이 맞다고 판단했다 — order/payment/
+inventory 세 서비스만 이번에 배선했다.
