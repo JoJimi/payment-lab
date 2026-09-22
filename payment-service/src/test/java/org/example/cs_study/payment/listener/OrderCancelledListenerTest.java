@@ -6,6 +6,8 @@ import java.io.IOException;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.UUID;
+import org.example.cs_study.common.inbox.ProcessedEventRepository;
+import org.example.cs_study.event.EventEnvelope;
 import org.example.cs_study.event.EventEnvelopeFactory;
 import org.example.cs_study.event.EventType;
 import org.example.cs_study.event.payload.OrderCancelledPayload;
@@ -91,6 +93,9 @@ class OrderCancelledListenerTest {
     @Autowired
     PaymentRepository paymentRepository;
 
+    @Autowired
+    ProcessedEventRepository processedEventRepository;
+
     @Test
     void order_cancelled를_받으면_APPROVED_결제를_CANCELLED로_바꾼다() {
         Long orderId = 777L;
@@ -111,12 +116,12 @@ class OrderCancelledListenerTest {
         payment = paymentRepository.save(payment);
         Long paymentId = payment.getId();
 
-        publish(orderId, "INSUFFICIENT_FUNDS");
+        String eventId = publishAndGetEventId(orderId, "INSUFFICIENT_FUNDS");
 
-        // "아무 일도 안 일어남"은 기다릴 조건이 없다 — 리스너가 처리할 시간을 준 뒤 상태가
-        // 그대로인지 확인한다(PaymentService#cancelForOrder가 APPROVED만 걸러 처리하므로,
-        // 여기서 실제로 바뀌면 그 필터링이 깨졌다는 뜻이다).
-        sleep(Duration.ofSeconds(2));
+        // processed_event에 기록됐다는 것 자체가 리스너가 예외 없이 끝까지 처리했다는 증거다
+        // — 단순히 "상태가 그대로였다"만 보면 필터링이 걸러낸 것인지 리스너가 처리 중 죽은
+        // 것인지 구분이 안 된다(CodeRabbit 리뷰, 2.14).
+        awaitEventProcessed(eventId);
         Payment unchanged = paymentRepository.findById(paymentId).orElseThrow();
         assertThat(unchanged.getStatus()).isEqualTo(PaymentStatus.FAILED);
     }
@@ -136,29 +141,34 @@ class OrderCancelledListenerTest {
         publish(orderId, "OUT_OF_STOCK");
         awaitPaymentStatus(paymentId, PaymentStatus.CANCELLED);
 
-        publish(orderId, "OUT_OF_STOCK");
+        String secondEventId = publishAndGetEventId(orderId, "OUT_OF_STOCK");
 
-        // 두 번째 발행이 예외 없이 처리되고 상태가 CANCELLED로 그대로 유지되는지 확인한다 —
-        // Payment.cancel()은 APPROVED에서만 허용되는 전이라, 필터링 없이 다시 불렀다면
-        // InvalidStateTransitionException으로 리스너가 죽었을 것이다.
-        sleep(Duration.ofSeconds(2));
+        // 두 번째 발행이 예외 없이 처리(processed_event 기록)되고 상태가 CANCELLED로 그대로
+        // 유지되는지 확인한다 — Payment.cancel()은 APPROVED에서만 허용되는 전이라, 필터링
+        // 없이 다시 불렀다면 InvalidStateTransitionException으로 리스너가 죽었을 것이다.
+        awaitEventProcessed(secondEventId);
         Payment stillCancelled = paymentRepository.findById(paymentId).orElseThrow();
         assertThat(stillCancelled.getStatus()).isEqualTo(PaymentStatus.CANCELLED);
     }
 
-    private void sleep(Duration duration) {
-        try {
-            Thread.sleep(duration.toMillis());
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException(e);
-        }
+    private void publish(Long orderId, String reason) {
+        publishAndGetEventId(orderId, reason);
     }
 
-    private void publish(Long orderId, String reason) {
+    /** @return 발행한 이벤트의 eventId — 중복 발행 테스트가 InboxService 처리 완료를 기다릴 때 쓴다. */
+    private String publishAndGetEventId(Long orderId, String reason) {
         OrderCancelledPayload payload = new OrderCancelledPayload(orderId, reason);
-        String json = objectMapper.writeValueAsString(EventEnvelopeFactory.create(EventType.ORDER_CANCELLED, payload));
+        EventEnvelope<OrderCancelledPayload> envelope = EventEnvelopeFactory.create(EventType.ORDER_CANCELLED, payload);
+        String json = objectMapper.writeValueAsString(envelope);
         kafkaTemplate.send("order.cancelled", orderId.toString(), json);
+        return envelope.eventId();
+    }
+
+    /** {@code SagaListenersIntegrationTest.awaitEventProcessed}와 같은 이유(2.14). */
+    private void awaitEventProcessed(String eventId) {
+        awaitTrue(
+                () -> processedEventRepository.findById(eventId).isPresent(),
+                "eventId=" + eventId + "가 시간 내에 처리되지 않았습니다");
     }
 
     private void awaitPaymentStatus(Long paymentId, PaymentStatus expected) {

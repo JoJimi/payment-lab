@@ -11,6 +11,8 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.example.cs_study.common.inbox.ProcessedEventRepository;
+import org.example.cs_study.event.EventEnvelope;
 import org.example.cs_study.event.EventEnvelopeFactory;
 import org.example.cs_study.event.EventType;
 import org.example.cs_study.event.payload.InventoryFailedPayload;
@@ -116,6 +118,9 @@ class SagaListenersIntegrationTest {
     @Autowired
     SagaStepRepository sagaStepRepository;
 
+    @Autowired
+    ProcessedEventRepository processedEventRepository;
+
     @Test
     void payment_completed와_inventory_reserved를_차례로_받으면_Saga가_NOTIFICATION까지_전진하고_알림_이벤트가_발행된다() {
         OrderResponse order = orderService.createOrder(new CreateOrderRequest(20L, 1, new BigDecimal("3000.0000"), "KRW"));
@@ -185,12 +190,13 @@ class SagaListenersIntegrationTest {
         awaitSagaStatus(sagaInstance.getSagaId(), SagaStatus.COMPLETED);
         assertNotificationRequestedPublished(order.id());
 
-        publish("payment.failed", order.id().toString(), EventType.PAYMENT_FAILED, payload);
+        String secondEventId = publishAndGetEventId("payment.failed", order.id().toString(), EventType.PAYMENT_FAILED, payload);
 
-        // 가드에 걸려 조용히 무시되는지, 예외 없이 상태가 그대로인지 확인한다 — 가드가 없다면
-        // 이미 FAILED인 PAYMENT 스텝에 fail()을 다시 불러 InvalidStateTransitionException으로
-        // 리스너가 죽었을 것이다.
-        sleep(Duration.ofSeconds(2));
+        // processed_event에 이 eventId가 기록됐다는 것 자체가 InboxService.processIfNew가
+        // 비즈니스 로직(가드 포함)을 예외 없이 끝까지 실행하고 커밋했다는 증거다 — 단순히
+        // "상태가 그대로였다"만 보면 가드가 걸러낸 것인지 리스너가 처리 중 죽은 것인지
+        // 구분이 안 된다(CodeRabbit 리뷰, 2.14).
+        awaitEventProcessed(secondEventId);
         assertThat(orderRepository.findById(order.id()).orElseThrow().getStatus()).isEqualTo(OrderStatus.CANCELLED);
         assertThat(sagaInstanceRepository.findById(sagaInstance.getSagaId()).orElseThrow().getStatus())
                 .isEqualTo(SagaStatus.COMPLETED);
@@ -258,8 +264,27 @@ class SagaListenersIntegrationTest {
     }
 
     private <T> void publish(String topic, String key, EventType eventType, T payload) {
-        String json = objectMapper.writeValueAsString(EventEnvelopeFactory.create(eventType, payload));
+        publishAndGetEventId(topic, key, eventType, payload);
+    }
+
+    /** @return 발행한 이벤트의 eventId — 중복 발행 테스트가 InboxService 처리 완료를 기다릴 때 쓴다. */
+    private <T> String publishAndGetEventId(String topic, String key, EventType eventType, T payload) {
+        EventEnvelope<T> envelope = EventEnvelopeFactory.create(eventType, payload);
+        String json = objectMapper.writeValueAsString(envelope);
         kafkaTemplate.send(topic, key, json);
+        return envelope.eventId();
+    }
+
+    /**
+     * {@code processed_event}에 이 eventId가 실제로 기록됐는지 기다린다(2.14, CodeRabbit
+     * 리뷰) — 상태가 안 바뀌었다는 것만으로는 "가드가 정상적으로 걸러냈다"와 "리스너가 아예
+     * 이 이벤트를 처리하다 죽었다"를 구분할 수 없다. {@code InboxService.processIfNew}가 이
+     * 행을 커밋해야만 비즈니스 로직(가드 포함)이 예외 없이 끝까지 실행됐다고 확신할 수 있다.
+     */
+    private void awaitEventProcessed(String eventId) {
+        awaitTrue(
+                () -> processedEventRepository.findById(eventId).isPresent(),
+                "eventId=" + eventId + "가 시간 내에 처리되지 않았습니다");
     }
 
     private void awaitOrderStatus(Long orderId, OrderStatus expected) {
@@ -291,15 +316,6 @@ class SagaListenersIntegrationTest {
                 .map(SagaInstance::getStatus)
                 .filter(expected::equals)
                 .isPresent(), "sagaId=" + sagaId + "의 status가 " + expected + "가 되지 않았습니다");
-    }
-
-    private void sleep(Duration duration) {
-        try {
-            Thread.sleep(duration.toMillis());
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException(e);
-        }
     }
 
     private void awaitTrue(java.util.function.BooleanSupplier condition, String failureMessage) {
