@@ -515,3 +515,50 @@ notification-service는 아직 영속 대상(JPA 엔티티)이 하나도 없어 
 Flyway 도입)을 여는 건 실제 알림 발송 로직 없이 인프라만 미리 짓는 셈이다. 실제 알림 로직을
 구현하는 시점(2-C/2-D)에 첫 엔티티와 함께 처리하는 쪽이 맞다고 판단했다 — order/payment/
 inventory 세 서비스만 이번에 배선했다.
+
+### 15. Semgrep으로 Outbox 우회 차단 (2.10) — 2-B 마무리
+
+**왜 리뷰만으로는 부족한가**: `OutboxRelay`가 `KafkaTemplate.send()`를 부르는 유일한 지점이어야
+한다는 규칙(§13)은 지금까지 Javadoc과 PR 리뷰로만 지켜지고 있었다. 서비스가 늘어나고 PR이
+쌓이면 리뷰어가 매번 "이 `.send()` 호출이 OutboxRelay 안인가?"를 눈으로 확인하는 건 결국
+놓친다 — 이슈 #55가 요구한 대로, 기계가 막아야 하는 규칙이다.
+
+**타입 기반 매칭(`metavariable-type`)을 쓴 이유**: 단순히 `.send(...)` 호출을 모두 잡으면
+`NotificationSender.send()`처럼 무관한 메서드까지 오탐이 난다. `money-no-floating-point.yml`처럼
+경로(`paths.include`)만으로 좁히는 방법도 있었지만, 이 규칙은 "어떤 파일에 있든 `KafkaTemplate`
+타입 변수의 `.send()`는 막는다"가 목적이라 경로보다 타입이 맞는 기준이다. Semgrep의
+`metavariable-type` operator는 같은 파일 안에서(cross-file 타입 추론은 Pro 엔진 전용) 필드/
+파라미터 선언을 보고 타입을 좁혀준다 — `OutboxRelay`처럼 `KafkaTemplate<String, String>` 필드를
+가진 클래스라면 정확히 잡힌다.
+
+**`OutboxRelay`만 예외로 허용하는 방법은 경로(`paths.exclude`)로 했다**: Semgrep OSS는 "이 호출이
+클래스 X 안에 있다"를 타입 매칭처럼 정밀하게 걸러주는 기능이 없어서(그건 AST상 "이 클래스가
+X라는 이름이다"를 아는 것과 다른 문제), 가장 명확한 방법은 `OutboxRelay.java` 파일 경로 자체를
+예외 처리하는 것이었다 — 이슈 완료 기준의 "OutboxRelay 클래스 내부는 예외 처리"를 만족하면서도
+규칙이 단순하게 유지된다. `paths.exclude` 패턴에 `**/`를 안 붙이면 최근 Semgrep 버전이 "앵커된
+경로로 해석이 곧 바뀐다"는 경고를 내서(Semgrepignore v2/Gitignore 스펙 정렬), 명시적으로
+`**/`를 붙여 항상 비-앵커(어느 깊이에 있든 매칭)로 고정했다.
+
+**`semgrep --test`와 `.semgrepignore`의 상호작용**: 이슈 완료 기준대로 룰 자체를 자체 검증하려면
+테스트 픽스처(`.semgrep/outbox-required.java`, `// ruleid:`/`// ok:` 주석)가 필요한데, 이 파일은
+의도적으로 위반 코드를 담고 있어서 그냥 두면 `pr-check.yml`의 실제 Semgrep 스캔(`--severity ERROR
+--error`)이 이 파일 자체 때문에 항상 실패한다. `.semgrepignore`에 `.semgrep/*.java`를 등록해
+일반 스캔에서는 건너뛰게 하면서도, `semgrep --test --config .semgrep/outbox-required.yml
+.semgrep/outbox-required.java`처럼 파일을 직접 타깃으로 주는 테스트 실행에는 영향이 없음을
+확인했다(ignore 패턴은 디렉터리 순회를 걸러낼 뿐, 명시적으로 지정한 단일 파일 타깃까지 막지는
+않는다).
+
+**로컬에서 실제로 검증한 것**: 이 원격 환경엔 `semgrep` CLI가 없어 `pip install --user
+--ignore-installed semgrep`으로 직접 설치했다(시스템 `PyJWT`와의 충돌 때문에 `--ignore-installed`
+필요). (1) `semgrep --test`로 룰 자체가 `// ruleid:`/`// ok:` 기대와 맞는지 통과 확인. (2) 전체
+저장소 스캔에서 `OutboxRelay.java`는 findings 0(정상 예외 처리), 테스트 픽스처는 `.semgrepignore`로
+스캔 대상에서 빠짐을 확인. (3) 이슈 완료 기준의 "의도적으로 위반 코드를 넣어 CI가 실제로 막는지
+확인"을 위해 `common-outbox` 안에 임시로 `kafkaTemplate.send(...)`를 직접 부르는 클래스를 만들어
+스캔했더니 `Blocking` finding으로 정확히 잡혔고, 검증 후 그 임시 파일은 삭제해 PR diff에는 남지
+않는다. Registry 룰셋(`p/java` 등)은 이 샌드박스의 아웃바운드 프록시가 `semgrep.dev`를 막아
+로컬에서 못 받아왔지만, 이번 변경은 로컬 커스텀 룰(`.semgrep/`)에만 있으므로 실제 검증(레지스트리
+룰 포함 전체 스캔)은 이전 PR들과 동일하게 CI에 맡긴다.
+
+이것으로 2-B(Kafka 기반, 이슈 #51)의 마지막 태스크가 끝났다 — 2.5(docker-compose)부터
+2.10(이 문서)까지, Kafka 인프라 → 토픽 설계 → 이벤트 봉투 → Outbox → Inbox → 우회 차단까지
+한 세트로 마무리됐다.

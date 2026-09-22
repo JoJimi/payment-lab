@@ -157,7 +157,13 @@ DO NOTHING`) → 처리를 한 트랜잭션으로 묶습니다(`OutboxService`�
 notification-service는 아직 영속 대상이 없어(2.2) 이번에도 배선하지 않았습니다 — 실제
 알림 로직을 구현하는 시점(2-C/2-D)에 첫 DB 연결과 함께 다룹니다.
 
-## 다음 단계
+## 구현 위치 (2.10)
 
-- **2.10**: `OutboxRelay` 밖에서 `KafkaTemplate.send()`를 직접 호출하면 막는 Semgrep 룰을
-  추가합니다(부록 D-3).
+`.semgrep/outbox-required.yml`의 `no-direct-kafka-send` 룰이 `OutboxRelay`
+(`common-outbox/.../OutboxRelay.java`) 밖에서 `KafkaTemplate.send()`를 직접 호출하면
+CI를 막습니다(`metavariable-type`으로 리시버가 `KafkaTemplate`인 호출만 잡고, 경로
+예외로 `OutboxRelay.java`만 허용). 상세 설계 근거는
+[troubleshooting/04-msa-split.md §15](../troubleshooting/04-msa-split.md)에 있습니다.
+
+이것으로 2-B(Kafka 기반, 이슈 #51)가 끝났습니다. 2-C(Saga 오케스트레이션, 2.11~2.16)에서
+실제로 각 토픽을 발행/구독하는 로직을 붙입니다.
