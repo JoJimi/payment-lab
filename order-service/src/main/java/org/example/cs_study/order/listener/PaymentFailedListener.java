@@ -6,6 +6,7 @@ import org.example.cs_study.event.EventEnvelopeReader;
 import org.example.cs_study.event.TraceContext;
 import org.example.cs_study.event.payload.PaymentFailedPayload;
 import org.example.cs_study.order.domain.saga.SagaInstance;
+import org.example.cs_study.order.domain.saga.SagaStatus;
 import org.example.cs_study.order.domain.saga.SagaStep;
 import org.example.cs_study.order.domain.saga.SagaStepName;
 import org.example.cs_study.order.repository.SagaInstanceRepository;
@@ -56,6 +57,14 @@ public class PaymentFailedListener {
         SagaInstance sagaInstance = sagaInstanceRepository
                 .findByOrderId(payload.orderId())
                 .orElseThrow(() -> new IllegalStateException("Saga 인스턴스를 찾을 수 없습니다: orderId=" + payload.orderId()));
+        if (sagaInstance.getStatus() != SagaStatus.STARTED) {
+            // 보상 자체의 멱등성(2.14) — payment.failed가 서로 다른 eventId로 중복 발행되면
+            // InboxService의 eventId 기반 중복 방지를 우회한다(같은 eventId 재전달은 이미
+            // 막힘). 이 Saga가 이미 STARTED를 벗어났다면(다른 트리거로 보상이 시작됐거나
+            // 끝났다는 뜻) 여기서 조용히 멈춘다 — 그대로 진행하면 이미 FAILED/COMPENSATED인
+            // 스텝에 fail()을 다시 호출해 InvalidStateTransitionException이 난다.
+            return;
+        }
         SagaStep paymentStep = sagaStepRepository
                 .findBySagaIdAndStepName(sagaInstance.getSagaId(), SagaStepName.PAYMENT)
                 .orElseThrow(() -> new IllegalStateException("PAYMENT 스텝을 찾을 수 없습니다: sagaId=" + sagaInstance.getSagaId()));

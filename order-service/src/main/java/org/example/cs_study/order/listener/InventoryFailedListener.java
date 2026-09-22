@@ -6,6 +6,7 @@ import org.example.cs_study.event.EventEnvelopeReader;
 import org.example.cs_study.event.TraceContext;
 import org.example.cs_study.event.payload.InventoryFailedPayload;
 import org.example.cs_study.order.domain.saga.SagaInstance;
+import org.example.cs_study.order.domain.saga.SagaStatus;
 import org.example.cs_study.order.domain.saga.SagaStep;
 import org.example.cs_study.order.domain.saga.SagaStepName;
 import org.example.cs_study.order.repository.SagaInstanceRepository;
@@ -65,6 +66,10 @@ public class InventoryFailedListener {
         SagaInstance sagaInstance = sagaInstanceRepository
                 .findByOrderId(payload.orderId())
                 .orElseThrow(() -> new IllegalStateException("Saga 인스턴스를 찾을 수 없습니다: orderId=" + payload.orderId()));
+        if (sagaInstance.getStatus() != SagaStatus.STARTED) {
+            // 보상 자체의 멱등성(2.14) — PaymentFailedListener의 같은 가드와 이유가 같다.
+            return;
+        }
 
         SagaStep inventoryStep = sagaStepRepository
                 .findBySagaIdAndStepName(sagaInstance.getSagaId(), SagaStepName.INVENTORY)

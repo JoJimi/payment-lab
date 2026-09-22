@@ -9,6 +9,7 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 import java.time.Instant;
 import lombok.AccessLevel;
 import lombok.Getter;
@@ -52,6 +53,10 @@ public class SagaStep {
 
     @Column(name = "attempted_at", nullable = false)
     private Instant attemptedAt;
+
+    /** 낙관적 락(2.14) — {@link SagaInstance#getVersion()} Javadoc과 같은 이유. */
+    @Version
+    private Long version;
 
     public SagaStep(String sagaId, SagaStepName stepName, String requestPayload) {
         this.sagaId = sagaId;

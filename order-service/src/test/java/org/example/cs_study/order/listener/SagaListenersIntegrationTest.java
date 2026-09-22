@@ -11,6 +11,8 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.example.cs_study.common.inbox.ProcessedEventRepository;
+import org.example.cs_study.event.EventEnvelope;
 import org.example.cs_study.event.EventEnvelopeFactory;
 import org.example.cs_study.event.EventType;
 import org.example.cs_study.event.payload.InventoryFailedPayload;
@@ -116,6 +118,9 @@ class SagaListenersIntegrationTest {
     @Autowired
     SagaStepRepository sagaStepRepository;
 
+    @Autowired
+    ProcessedEventRepository processedEventRepository;
+
     @Test
     void payment_completed와_inventory_reserved를_차례로_받으면_Saga가_NOTIFICATION까지_전진하고_알림_이벤트가_발행된다() {
         OrderResponse order = orderService.createOrder(new CreateOrderRequest(20L, 1, new BigDecimal("3000.0000"), "KRW"));
@@ -164,6 +169,37 @@ class SagaListenersIntegrationTest {
         awaitSagaStatus(sagaInstance.getSagaId(), SagaStatus.COMPLETED);
 
         assertNotificationRequestedPublished(order.id());
+    }
+
+    @Test
+    void payment_failed가_서로_다른_eventId로_중복_발행돼도_안전하다() {
+        // 2.14: InboxService는 eventId가 같은 재전달만 막는다 — 같은 orderId에 대해
+        // payment.failed가 서로 다른 eventId로 두 번 발행되는 상황(예: payment-service의
+        // 버그로 인한 중복 발행)까지 리스너 자체가 흡수하는지 확인한다. publish()가 매번
+        // EventEnvelopeFactory로 새 eventId를 만들어주므로 이 두 번의 publish는 서로 다른
+        // eventId를 갖는다 — InboxService의 중복 방지로는 못 막고, PaymentFailedListener의
+        // 자체 상태 가드(sagaInstance.status != STARTED면 무시)가 막아야 한다.
+        OrderResponse order = orderService.createOrder(new CreateOrderRequest(23L, 1, new BigDecimal("1000.0000"), "KRW"));
+        SagaInstance sagaInstance = sagaInstanceRepository.findByOrderId(order.id()).orElseThrow();
+
+        PaymentFailedPayload payload =
+                new PaymentFailedPayload(order.id(), 112L, new BigDecimal("1000.0000"), "KRW", "INSUFFICIENT_FUNDS");
+        publish("payment.failed", order.id().toString(), EventType.PAYMENT_FAILED, payload);
+
+        awaitOrderStatus(order.id(), OrderStatus.CANCELLED);
+        awaitSagaStatus(sagaInstance.getSagaId(), SagaStatus.COMPLETED);
+        assertNotificationRequestedPublished(order.id());
+
+        String secondEventId = publishAndGetEventId("payment.failed", order.id().toString(), EventType.PAYMENT_FAILED, payload);
+
+        // processed_event에 이 eventId가 기록됐다는 것 자체가 InboxService.processIfNew가
+        // 비즈니스 로직(가드 포함)을 예외 없이 끝까지 실행하고 커밋했다는 증거다 — 단순히
+        // "상태가 그대로였다"만 보면 가드가 걸러낸 것인지 리스너가 처리 중 죽은 것인지
+        // 구분이 안 된다(CodeRabbit 리뷰, 2.14).
+        awaitEventProcessed(secondEventId);
+        assertThat(orderRepository.findById(order.id()).orElseThrow().getStatus()).isEqualTo(OrderStatus.CANCELLED);
+        assertThat(sagaInstanceRepository.findById(sagaInstance.getSagaId()).orElseThrow().getStatus())
+                .isEqualTo(SagaStatus.COMPLETED);
     }
 
     @Test
@@ -228,8 +264,27 @@ class SagaListenersIntegrationTest {
     }
 
     private <T> void publish(String topic, String key, EventType eventType, T payload) {
-        String json = objectMapper.writeValueAsString(EventEnvelopeFactory.create(eventType, payload));
+        publishAndGetEventId(topic, key, eventType, payload);
+    }
+
+    /** @return 발행한 이벤트의 eventId — 중복 발행 테스트가 InboxService 처리 완료를 기다릴 때 쓴다. */
+    private <T> String publishAndGetEventId(String topic, String key, EventType eventType, T payload) {
+        EventEnvelope<T> envelope = EventEnvelopeFactory.create(eventType, payload);
+        String json = objectMapper.writeValueAsString(envelope);
         kafkaTemplate.send(topic, key, json);
+        return envelope.eventId();
+    }
+
+    /**
+     * {@code processed_event}에 이 eventId가 실제로 기록됐는지 기다린다(2.14, CodeRabbit
+     * 리뷰) — 상태가 안 바뀌었다는 것만으로는 "가드가 정상적으로 걸러냈다"와 "리스너가 아예
+     * 이 이벤트를 처리하다 죽었다"를 구분할 수 없다. {@code InboxService.processIfNew}가 이
+     * 행을 커밋해야만 비즈니스 로직(가드 포함)이 예외 없이 끝까지 실행됐다고 확신할 수 있다.
+     */
+    private void awaitEventProcessed(String eventId) {
+        awaitTrue(
+                () -> processedEventRepository.findById(eventId).isPresent(),
+                "eventId=" + eventId + "가 시간 내에 처리되지 않았습니다");
     }
 
     private void awaitOrderStatus(Long orderId, OrderStatus expected) {
