@@ -207,3 +207,35 @@ CI를 막습니다(`metavariable-type`으로 리시버가 `KafkaTemplate`인 호
 하는 이유, notification-service가 처음 DB를 갖게 된 경위 등)는
 [troubleshooting/05-saga-orchestration.md](../troubleshooting/05-saga-orchestration.md)에
 있습니다.
+
+## 구현 위치 (2.13)
+
+`payment.failed`/`inventory.failed`/`order.cancelled` 세 토픽이 실제로 연결됐습니다 —
+보상 트랜잭션(로드맵 "재고 예약 실패 → 결제 취소 → 주문 취소")이 이제 Kafka 이벤트로
+동작합니다. 2.12에서 미뤄뒀던 `SagaInstance.complete()`의 정확한 호출 시점도 이번에 정상
+흐름/보상 흐름 양쪽 다 확정했습니다.
+
+| 토픽 | 발행 지점 | 구독 지점 |
+|---|---|---|
+| `payment.failed` | `PaymentService.applyResult()`(2.12부터 이미 발행 중이었음) | `order-service`의 `PaymentFailedListener`(신규) |
+| `inventory.failed` | `inventory-service`의 `PaymentCompletedListener`(2.12부터 이미 발행 중이었음) | `order-service`의 `InventoryFailedListener`(신규) |
+| `order.cancelled` | `order-service`의 `SagaCompensationService.finish()`(신규) | `payment-service`의 `OrderCancelledListener`(신규) |
+
+**표의 "구독 서비스"와 실제로 다른 점 하나**: 원래 2.6 설계 표는 `order.cancelled`를
+inventory-service와 notification-service도 구독하는 것으로 적어뒀지만, 실제로는
+`payment-service`만 구독합니다.
+
+1. **inventory-service는 구독하지 않습니다.** 2.12에서 `reserve()`와 `confirm()`을 같은
+   트랜잭션에서 바로 잇달아 호출하도록 설계했고, `reserve()`는 재고 부족을 확인하면
+   `available`/`reserved`를 전혀 건드리지 않고 예외만 던집니다(`Inventory.reserve` 참고).
+   즉 `inventory.failed`가 발행되는 시점에 이 서비스 DB에는 되돌릴 부수효과가 이미 없습니다
+   — 재고를 예약이 성공한 뒤에 실패하는 시나리오 자체가 지금 설계엔 존재하지 않습니다.
+2. **notification-service는 구독하지 않습니다.** 정상 흐름(`InventoryReservedListener`)과
+   대칭으로, order-service가 보상 마무리 시점에 `notification.requested`(type
+   `ORDER_CANCELLED`)를 직접 발행합니다 — 알림 채널을 하나로 유지해 notification-service가
+   "완료"와 "취소" 두 가지 트리거를 따로 구분해 구독할 필요가 없게 합니다.
+
+설계 근거(각 스텝을 왜 낙관적으로 기록하는지, `SagaInstance.complete()` 호출 시점을
+정상/보상 흐름 어디서 확정했는지 등)는
+[troubleshooting/05-saga-orchestration.md](../troubleshooting/05-saga-orchestration.md)에
+있습니다.

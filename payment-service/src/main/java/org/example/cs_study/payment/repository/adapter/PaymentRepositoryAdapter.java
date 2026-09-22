@@ -1,5 +1,6 @@
 package org.example.cs_study.payment.repository.adapter;
 
+import java.util.List;
 import java.util.Optional;
 import org.example.cs_study.payment.domain.Payment;
 import org.example.cs_study.payment.repository.PaymentRepository;
@@ -33,6 +34,11 @@ class PaymentRepositoryAdapter implements PaymentRepository {
     @Override
     public Optional<Payment> findByIdempotencyKey(String idempotencyKey) {
         return springDataPaymentRepository.findByIdempotencyKey(idempotencyKey);
+    }
+
+    @Override
+    public List<Payment> findByOrderId(Long orderId) {
+        return springDataPaymentRepository.findByOrderId(orderId);
     }
 
     @Override
