@@ -1,3 +1,35 @@
+spring:
+  datasource:
+    # 2.12: README 방침(2.2)대로 inventory-service와 같은 인스턴스/DB를 공유한다(postgres-inventory,
+    # 호스트 포트 5434) — notification-service가 처음으로 영속 대상(Notification 엔티티)을 갖는
+    # 시점이 바로 지금이다. Flyway 이력은 별도 테이블(application.yml)로 분리해 충돌을 피한다.
+    url: jdbc:postgresql://localhost:5434/payment_lab_inventory
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+
+  kafka:
+    bootstrap-servers: localhost:9092
+    # 2.12: notification.requested 리스너. 이 서비스는 아무 토픽도 발행하지 않아(순수
+    # 소비자 — event-catalog.md) producer 설정이 필요 없다.
+    consumer:
+      group-id: notification-service
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      auto-offset-reset: earliest
+
+management:
+  endpoint:
+    health:
+      show-details: always
+
 logging:
   structured:
     format:

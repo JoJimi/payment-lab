@@ -23,6 +23,14 @@ spring:
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
+    # 2.12: payment.completed/inventory.reserved 리스너. 값은 OutboxRelay가 이미 직렬화한
+    # JSON 문자열 그대로라(EventEnvelope를 감싸지 않고 보냄) 키/값 모두 String으로 받고,
+    # EventEnvelopeReader(common-event)가 ObjectMapper로 다시 파싱한다.
+    consumer:
+      group-id: order-service
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      auto-offset-reset: earliest
 
 management:
   endpoint:

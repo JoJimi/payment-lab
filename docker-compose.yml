@@ -47,8 +47,10 @@ services:
       timeout: 5s
       retries: 5
 
-  # inventory-service 전용이지만, README 방침상 notification-service가 엔티티를 갖게 되면
-  # 같은 인스턴스(같은 DB)를 공유한다 — 지금은 notification-service에 엔티티가 없어 접속하지 않는다.
+  # README 방침상 inventory-service와 notification-service가 같은 인스턴스(같은 DB)를
+  # 공유한다. 2.12부터 notification-service도 실제로 접속한다(Notification 엔티티) —
+  # Flyway 이력 테이블을 서비스별로 분리해 두 앱의 마이그레이션이 충돌하지 않는다
+  # (notification-service/src/main/resources/application.yml 참고).
   postgres-inventory:
     image: postgres:16-alpine
     container_name: payment-lab-postgres-inventory

@@ -4,12 +4,16 @@ plugins {
 
 dependencies {
     implementation(project(":common-web"))
+    implementation(project(":common-event"))
     implementation(project(":common-outbox"))
     implementation(project(":common-inbox"))
 
     // ---- Web / 기본 ----
     implementation("org.springframework.boot:spring-boot-starter-webmvc")
     implementation("org.springframework.boot:spring-boot-starter-validation")
+
+    // ---- Kafka (2.12: @KafkaListener) ----
+    implementation("org.springframework.kafka:spring-kafka")
 
     // ---- DB / 마이그레이션 ----
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")
@@ -40,4 +44,6 @@ dependencies {
     testImplementation("org.springframework.boot:spring-boot-testcontainers")
     testImplementation("org.testcontainers:testcontainers-junit-jupiter")
     testImplementation("org.testcontainers:testcontainers-postgresql")
+    // 2.12: @KafkaListener 통합 테스트(EmbeddedKafka).
+    testImplementation("org.springframework.kafka:spring-kafka-test")
 }
