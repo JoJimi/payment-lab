@@ -24,6 +24,12 @@ dependencies {
 
     // ---- Kafka (2.12: @KafkaListener) ----
     implementation("org.springframework.kafka:spring-kafka")
+    // spring-kafka 자체는 Boot 비의존 라이브러리라 이것만으로는 컨슈머 팩토리/리스너 컨테이너
+    // 자동구성이 안 생긴다(common-outbox의 같은 코멘트 참고) — 이 서비스는 common-outbox를
+    // 참조하지 않아(순수 컨슈머, Outbox 발행 없음) 다른 서비스들처럼 전이 의존성으로 딸려오지
+    // 않는다. 없으면 @KafkaListener가 조용히 아무 컨테이너에도 안 붙어 메시지를 영원히 못
+    // 받는다(CI에서 실측: 코드는 컴파일되고 컨텍스트도 뜨지만 리스너가 죽어 있었다).
+    implementation("org.springframework.boot:spring-boot-kafka")
 
     // ---- Test ----
     testImplementation("org.springframework.boot:spring-boot-starter-test")

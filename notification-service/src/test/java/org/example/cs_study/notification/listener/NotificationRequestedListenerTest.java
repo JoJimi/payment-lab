@@ -3,6 +3,8 @@ package org.example.cs_study.notification.listener;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.Duration;
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.serialization.StringSerializer;
 import org.example.cs_study.event.EventEnvelopeFactory;
 import org.example.cs_study.event.EventType;
 import org.example.cs_study.event.payload.NotificationRequestedPayload;
@@ -12,8 +14,11 @@ import org.example.cs_study.notification.repository.SpringDataNotificationReposi
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.kafka.core.DefaultKafkaProducerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.test.EmbeddedKafkaBroker;
 import org.springframework.kafka.test.context.EmbeddedKafka;
+import org.springframework.kafka.test.utils.KafkaTestUtils;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.junit.jupiter.Container;
@@ -24,6 +29,12 @@ import tools.jackson.databind.ObjectMapper;
 /**
  * {@link NotificationRequestedListener}가 이 서비스의 첫 실제 소비 경로를 증명한다(2.12) —
  * {@code notification.requested}를 받아 {@link Notification} 행을 남긴다.
+ *
+ * <p>메시지 발행은 앱 컨텍스트의 {@code KafkaTemplate} 빈을 쓰지 않고 이 테스트가 직접
+ * {@link DefaultKafkaProducerFactory}로 만든다 — 이 서비스는 순수 컨슈머라 common-outbox의
+ * {@code OutboxKafkaConfig} 같은 concrete-typed {@code KafkaTemplate<String, String>} 빈이
+ * 없다(Boot 자동구성 빈은 와일드카드 제네릭이라 이 필드 타입과 안 맞는다, 2.8에서 이미 겪은
+ * 문제). 다른 서비스들의 통합 테스트가 raw {@code Consumer}를 직접 만드는 것과 대칭이다.
  */
 @Testcontainers
 @EmbeddedKafka(partitions = 1, topics = "notification.requested")
@@ -59,7 +70,7 @@ class NotificationRequestedListenerTest {
     }
 
     @Autowired
-    KafkaTemplate<String, String> kafkaTemplate;
+    EmbeddedKafkaBroker embeddedKafkaBroker;
 
     @Autowired
     ObjectMapper objectMapper;
@@ -74,9 +85,18 @@ class NotificationRequestedListenerTest {
                 new NotificationRequestedPayload(orderId, NotificationType.ORDER_COMPLETED, "주문이 완료됐습니다");
         String json = objectMapper.writeValueAsString(EventEnvelopeFactory.create(EventType.NOTIFICATION_REQUESTED, payload));
 
-        kafkaTemplate.send("notification.requested", orderId.toString(), json);
+        // KafkaTemplate은 AutoCloseable이 아니라 try-with-resources로 못 감싼다 — 테스트
+        // 클래스당 발행이 이 한 번뿐이라 프로듀서를 명시적으로 안 닫아도 JVM 종료 시 정리된다.
+        createProducer().send("notification.requested", orderId.toString(), json);
 
         awaitNotificationSaved(orderId);
+    }
+
+    private KafkaTemplate<String, String> createProducer() {
+        var producerProps = KafkaTestUtils.producerProps(embeddedKafkaBroker);
+        producerProps.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+        producerProps.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+        return new KafkaTemplate<>(new DefaultKafkaProducerFactory<>(producerProps));
     }
 
     private void awaitNotificationSaved(Long orderId) {
