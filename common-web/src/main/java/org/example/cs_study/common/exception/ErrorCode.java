@@ -17,6 +17,9 @@ public enum ErrorCode {
     // ============================================
     INVALID_INPUT_VALUE(HttpStatus.BAD_REQUEST, "CMN001", "잘못된 입력 값입니다."),
     INVALID_STATE_TRANSITION(HttpStatus.CONFLICT, "CMN002", "허용되지 않는 상태 전이입니다."),
+    // 2.1: 멀티모듈 분리로 서비스 간 동기 호출이 제거되면서 일시적으로 미구현인 API용.
+    // 503(SERVICE_UNAVAILABLE)은 "일시적 장애"에 예약해두고, "아직 안 만들었다"는 501로 구분한다.
+    NOT_IMPLEMENTED(HttpStatus.NOT_IMPLEMENTED, "CMN003", "아직 구현되지 않은 기능입니다."),
 
     // ============================================
     // 상품 (PROD)

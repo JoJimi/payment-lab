@@ -3,8 +3,8 @@ spring:
     # 2.1: 아직 payment-service만의 DB로 분리되지 않은 과도기 상태 — 모놀리식 시절과 같은
     # payment_lab_dev를 공유한다. 실제 분리는 2.2(서비스별 DB 분리)에서 진행.
     url: jdbc:postgresql://localhost:5432/payment_lab_dev
-    username: cs
-    password: cs123
+    username: ${DB_USERNAME:cs}
+    password: ${DB_PASSWORD:cs123}
     hikari:
       maximum-pool-size: 20
       minimum-idle: 5

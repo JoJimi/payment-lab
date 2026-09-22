@@ -135,3 +135,39 @@ import하는 곳은 0건이었다 — 전부 `common/` 포트 인터페이스로
 서비스든 자신의 패키지 밖(`common-*`)에 있는 `@Entity`/`@Repository`를 쓰게 되면 똑같이
 재발한다 — 새 서비스 Application 클래스를 만들 때마다 확인할 것. `compileJava`로는 절대
 못 잡는다(런타임 컨텍스트 로딩 시점 오류), CI의 `@SpringBootTest`가 유일한 방어선이었다.
+
+---
+
+### 6. 공유 DB에서 3개 서비스가 완전히 동일한 Flyway 마이그레이션을 공유 이력으로 실행한다 — 지금은 안전하지만 2.2 전에 반드시 알아야 함
+
+CodeRabbit이 지적한 내용([PR #46 리뷰](https://github.com/JoJimi/payment-lab/pull/46))을 검토하고
+지금 당장은 고치지 않기로 판단한 근거를 남긴다.
+
+**현재 상태**: `order-service`/`payment-service`/`inventory-service` 셋 다
+`payment_lab_dev`(같은 물리 DB)를 보고, `spring.flyway.table`을 지정하지 않아 기본
+`flyway_schema_history`도 공유한다. 세 서비스의 `V1__init.sql`/`V2__domain_schema.sql`은
+지금 완전히 동일한 파일이다. 그래서 가장 먼저 뜨는 서비스가 전체 스키마(products/inventory/
+orders/payments/idempotency_keys/outbox)를 만들고, 나머지 둘은 같은 이력을 보고 "이미
+적용됨"으로 건너뛴다 — 지금은 **의도적으로 안전한 상태**다.
+
+**검토한 대안과 기각 이유**:
+- *서비스별로 `spring.flyway.table` 이름을 분리한다* → 겉보기엔 깔끔하지만 틀렸다. 세 서비스가
+  각자 빈 이력 테이블을 갖게 되므로, 가장 먼저 뜬 서비스가 이미 만든 테이블을 나머지 두 서비스가
+  "아직 안 만들어짐"으로 착각해 같은 `CREATE TABLE`을 다시 실행 → 매번 "already exists" 에러로
+  기동 실패. 오히려 지금보다 나쁜 상태를 만든다.
+- *payment/inventory-service의 Flyway를 비활성화하고 order-service만 소유자로 둔다* → 로컬
+  docker-compose의 장수命 DB에는 통하지만, **테스트가 깨진다**. `@Testcontainers`를 쓰는 각
+  테스트 클래스는 완전히 새 빈 Postgres 컨테이너를 혼자 띄운다 — 그 안에서는 "다른 서비스가 먼저
+  떠서 만들어준 테이블"이 애초에 존재하지 않는다. Flyway를 비활성화한 서비스의 테스트는 스키마가
+  하나도 없는 채로 시작해 전부 실패한다(이번 PR에서 바로 이 실수를 할 뻔하다가 CI에서 통과하던
+  build-test를 또 깨뜨릴 뻔해서 되돌렸다).
+
+**결론**: 진짜 해법은 서비스별 DB/스키마 분리(2.2, 이슈 #43)뿐이다. 그때는 각 서비스의
+마이그레이션 파일 자체를 자신이 소유한 테이블만 남기도록 쪼개야 한다 — 지금처럼 동일한
+V1/V2를 유지한 채 이력 테이블만 분리하는 절반짜리 수정은 위 두 가지 이유로 하지 않는다.
+
+**진짜 위험 구간**: 2.2 작업 중 세 서비스의 V1/V2를 서로 다르게 고치는 **중간 단계**. 그
+순간부터 공유 이력을 보는 서비스들이 서로 다른 체크섬을 보고할 수 있다. 2.2 PR에서는 이 전환을
+한 커밋 안에서 원자적으로 끝내거나(모든 서비스의 마이그레이션을 동시에 분리), 로컬 dev DB를
+`docker compose down -v`로 초기화하고 서비스별 DB/스키마로 새로 시작하는 방법 중 하나를 써야
+한다 — 2.2 착수 시 이 문서를 먼저 볼 것.

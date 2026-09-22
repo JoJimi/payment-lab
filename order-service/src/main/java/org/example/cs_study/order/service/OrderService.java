@@ -1,5 +1,7 @@
 package org.example.cs_study.order.service;
 
+import org.example.cs_study.common.exception.BusinessException;
+import org.example.cs_study.common.exception.ErrorCode;
 import org.example.cs_study.common.exception.order.OrderNotFoundException;
 import org.example.cs_study.order.domain.Order;
 import org.example.cs_study.order.dto.request.CreateOrderRequest;
@@ -27,7 +29,10 @@ public class OrderService {
      */
     @Transactional
     public OrderResponse createOrder(CreateOrderRequest request) {
-        throw new UnsupportedOperationException(
+        // UnsupportedOperationException을 던지면 GlobalExceptionHandler가 못 잡아 원본 스택트레이스가
+        // 노출된 500으로 샌다(PR #39와 같은 문제). 표준 ErrorResponse(501)로 응답하도록 BusinessException을 쓴다.
+        throw new BusinessException(
+                ErrorCode.NOT_IMPLEMENTED,
                 "createOrder는 2-B(Kafka Saga)에서 재구현 예정 — inventory-service 동기 호출이 2.1/2.3에서 제거됨");
     }
 
