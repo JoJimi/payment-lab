@@ -1,0 +1,20 @@
+rules:
+  - id: no-direct-kafka-send
+    languages: [java]
+    severity: ERROR
+    message: >-
+      KafkaTemplate.send()를 직접 호출하면 안 됩니다. 이벤트 발행은 반드시 Outbox 테이블에
+      적재 후 OutboxRelay가 폴링해서 내보내야 합니다(common-outbox 모듈, Transactional
+      Outbox 패턴) — 그래야 비즈니스 저장과 이벤트 발행이 한 트랜잭션으로 묶입니다.
+      직접 send()를 부르면 저장은 됐는데 발행이 안 되거나 그 반대인 상황이 생길 수 있습니다.
+      (docs/architecture/event-catalog.md, OutboxService.save()를 대신 쓰세요)
+    patterns:
+      - pattern: $KAFKA_TEMPLATE.send(...)
+      - metavariable-type:
+          metavariable: $KAFKA_TEMPLATE
+          type: KafkaTemplate
+    paths:
+      exclude:
+        - "**/common-outbox/src/main/java/org/example/cs_study/common/outbox/OutboxRelay.java"
+
+# 2.10 완료: OutboxRelay 밖에서 KafkaTemplate.send() 직접 호출을 막는다(로드맵 부록 D-3).

@@ -13,5 +13,4 @@ rules:
         - "**/payment/**"
         - "**/order/**"
 
-# 2.10에서 no-direct-kafka-send 룰(Outbox 우회 방지)을 이 디렉터리에 추가할 것.
-# Kafka/Saga 코드가 아직 없어 지금은 대상이 없다.
+# 2.10: no-direct-kafka-send 룰(Outbox 우회 방지)은 outbox-required.yml에 추가함.
