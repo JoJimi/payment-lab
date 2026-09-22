@@ -34,7 +34,12 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * 트리비얼한 대상으로 재현한다.
  */
 @Testcontainers
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE, classes = IdempotencyRedisDownTest.TestApp.class)
+@SpringBootTest(
+        webEnvironment = SpringBootTest.WebEnvironment.NONE,
+        // TestApp만 넘기면 컴포넌트 스캔이 IdempotentCounterService를 찾아줄 거라 생각하기 쉽지만,
+        // Spring Boot Test는 src/test에서 컴파일된 클래스를 기본적으로 스캔에서 제외한다
+        // (TestTypeExcludeFilter). classes 배열에 명시적으로 나열해야 그 제외 필터를 우회한다.
+        classes = {IdempotencyRedisDownTest.TestApp.class, IdempotencyRedisDownTest.IdempotentCounterService.class})
 class IdempotencyRedisDownTest {
 
     @SpringBootApplication

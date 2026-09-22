@@ -232,3 +232,40 @@ CodeRabbit이 [PR #46 리뷰](https://github.com/JoJimi/payment-lab/pull/46)에�
 동일한 방식으로 이 모듈의 테스트 컨텍스트에도 `MeterRegistry` 빈을 공급한다. 프로덕션
 `implementation` 의존성은 건드리지 않았다(이 모듈 자체는 여전히 actuator를 강제하지 않고,
 소비 서비스가 원하면 붙이는 구조를 유지).
+
+### 9. `MeterRegistry` 고치고 나니 `IdempotentCounterService` 빈 자체가 안 잡혔다 — Spring Boot Test의 `TestTypeExcludeFilter`
+
+§8을 고쳐 CI에 다시 올렸더니(`b268e7e`) 같은 두 테스트가 다른 오류로 또 실패했다:
+
+```
+NoSuchBeanDefinitionException: No qualifying bean of type
+'...IdempotencyAspectConcurrencyTest$IdempotentCounterService' available
+```
+
+이번엔 `IdempotencyAspect` 빈 생성 자체가 실패한 게 아니라(스택트레이스에 `idempotencyAspect`
+언급이 아예 없다), 애초에 `IdempotentCounterService` 빈이 컨테이너에 등록조차 안 됐다.
+`TestApp`(`@SpringBootApplication`, `classes=`로 직접 넘김)은 정상 등록됐는데, 같은 패키지에
+`@Component`로 선언한 `IdempotentCounterService`(컴포넌트 스캔으로 찾아줄 거라 가정)만 빠졌다.
+
+Docker 없이 로컬에서 원인을 확정하려고, `common-idempotency`에 H2 인메모리 DB +
+`localhost:16379`(연결 안 되는 더미 포트)를 쓰는 임시 스크래치 테스트를 만들어 똑같은
+`TestApp`/`@Component` 중첩 클래스 패턴을 재현했다 — Testcontainers 없이도 100% 재현됐다.
+`ctx.getBeanDefinitionNames()`로 등록된 빈 목록을 찍어보니 `TestApp`만 있고
+`IdempotentCounterService`는 아예 없었다.
+
+**근본 원인**: Spring Boot Test는 `@SpringBootTest`가 컴포넌트 스캔을 돌릴 때
+`src/test` 소스셋에서 컴파일된 클래스를 기본적으로 스캔 대상에서 제외한다
+(`TypeExcludeFilter`/내부적으로 등록되는 test-exclude 필터 — 테스트 픽스처/헬퍼 클래스가
+의도치 않게 실제 빈으로 등록되는 사고를 막기 위한 안전장치, 대부분의 프로젝트에서
+`@SpringBootTest` 자신과 같은 패키지에 컴포넌트 스캔 대상 앱이 있는 흔한 구조를 보호한다).
+`TestApp`이 등록된 건 컴포넌트 스캔으로 "찾아서"가 아니라 `@SpringBootTest(classes=...)`에
+직접 나열해서(명시적 import) 등록된 것이었다 — 즉 이 제외 필터를 원래부터 타지 않는 경로였다.
+`IdempotentCounterService`는 스캔에만 의존했으니 같은 이유로 조용히 빠졌다.
+
+**수정**: `IdempotentCounterService`도 `TestApp`과 함께 `classes` 배열에 명시적으로
+나열했다 — `classes = {X.TestApp.class, X.IdempotentCounterService.class}`. 컴포넌트
+스캔에 기대지 않고 두 클래스 모두 직접 import하는 경로로 등록되므로 제외 필터를 타지 않는다.
+
+**교훈**: `@SpringBootTest`에 중첩 `@Component` 픽스처를 쓸 때 "같은 패키지니까 컴포넌트
+스캔이 찾아주겠지"라고 가정하면 안 된다 — `src/test`의 클래스는 기본적으로 스캔 제외 대상이다.
+컨텍스트에 넣고 싶은 테스트 전용 빈은 항상 `classes=`(또는 `@Import`)에 명시적으로 올려야 한다.

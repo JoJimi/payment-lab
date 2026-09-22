@@ -40,7 +40,14 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * 같은 동시성 시나리오를 재현한다.
  */
 @Testcontainers
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE, classes = IdempotencyAspectConcurrencyTest.TestApp.class)
+@SpringBootTest(
+        webEnvironment = SpringBootTest.WebEnvironment.NONE,
+        // TestApp만 넘기면 @SpringBootApplication의 컴포넌트 스캔이 IdempotentCounterService를
+        // 찾아줄 거라 생각하기 쉽지만, Spring Boot Test는 src/test에서 컴파일된 클래스를
+        // 기본적으로 스캔에서 제외한다(TestTypeExcludeFilter — 테스트 픽스처가 의도치 않게 빈으로
+        // 등록되는 걸 막기 위한 안전장치). classes 배열에 명시적으로 나열해야
+        // (직접 import처럼 취급돼) 그 제외 필터를 우회해서 등록된다.
+        classes = {IdempotencyAspectConcurrencyTest.TestApp.class, IdempotencyAspectConcurrencyTest.IdempotentCounterService.class})
 class IdempotencyAspectConcurrencyTest {
 
     @SpringBootApplication
