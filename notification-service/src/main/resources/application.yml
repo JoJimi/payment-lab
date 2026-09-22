@@ -1,0 +1,27 @@
+spring:
+  application:
+    name: notification-service
+
+  profiles:
+    active: dev
+
+server:
+  port: 8084
+  shutdown: graceful
+
+spring.lifecycle:
+  timeout-per-shutdown-phase: 20s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus,metrics
+  tracing:
+    sampling:
+      probability: 1.0
+
+logging:
+  level:
+    root: INFO
+    org.example: DEBUG

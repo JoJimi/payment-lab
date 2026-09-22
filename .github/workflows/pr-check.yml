@@ -95,12 +95,18 @@ jobs:
 
       # gradle.lockfile이 커밋되어 있어야 Trivy가 Java 의존성을 인식함.
       # 락파일이 없으면 취약점 0건으로 "조용히" 통과한다 (R.CI4).
-      - name: Verify lockfile exists
+      # 2.1: 멀티모듈 전환으로 락파일이 모듈별로 생긴다(루트에는 없음).
+      - name: Verify lockfiles exist
         run: |
-          test -f gradle.lockfile || {
-            echo "::error::gradle.lockfile이 없습니다. ./gradlew dependencies --write-locks 결과를 커밋하세요."
-            exit 1
-          }
+          missing=0
+          for f in common-event common-web common-idempotency mock-pg-server \
+                   order-service payment-service inventory-service notification-service; do
+            if [ ! -f "$f/gradle.lockfile" ]; then
+              echo "::error::$f/gradle.lockfile이 없습니다. ./gradlew :$f:dependencies --write-locks 결과를 커밋하세요."
+              missing=1
+            fi
+          done
+          exit $missing
 
       - name: Trivy fs scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0

@@ -1,0 +1,53 @@
+spring:
+  application:
+    name: order-service
+
+  profiles:
+    active: dev
+
+  datasource:
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    # OSIV(Open Session In View) 비활성.
+    # 켜두면 컨트롤러 응답이 끝날 때까지 커넥션을 붙잡고 있어서
+    # 1-D 동시성 실험에서 풀 고갈의 원인이 락인지 OSIV인지 구분이 안 됨.
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+        default_batch_fetch_size: 100
+        jdbc:
+          # DB에는 UTC(timestamptz)로 저장, 표시할 때만 KST 변환.
+          time_zone: UTC
+
+  flyway:
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+
+server:
+  port: 8081
+  shutdown: graceful
+
+spring.lifecycle:
+  timeout-per-shutdown-phase: 20s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus,metrics
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+      percentiles:
+        http.server.requests: 0.5,0.95,0.99
+  tracing:
+    sampling:
+      probability: 1.0
+
+logging:
+  level:
+    root: INFO
+    org.example: DEBUG
