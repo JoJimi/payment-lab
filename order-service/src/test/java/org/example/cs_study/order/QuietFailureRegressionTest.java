@@ -139,7 +139,7 @@ class QuietFailureRegressionTest {
             this.counter = counter;
         }
 
-        @Around("execution(* org.example.cs_study.QuietFailureRegressionTest.AopTarget.ping(..))")
+        @Around("execution(* org.example.cs_study.order.QuietFailureRegressionTest.AopTarget.ping(..))")
         Object countInvocation(ProceedingJoinPoint pjp) throws Throwable {
             counter.increment();
             return pjp.proceed();
