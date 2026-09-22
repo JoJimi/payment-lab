@@ -269,3 +269,34 @@ Docker 없이 로컬에서 원인을 확정하려고, `common-idempotency`에 H2
 **교훈**: `@SpringBootTest`에 중첩 `@Component` 픽스처를 쓸 때 "같은 패키지니까 컴포넌트
 스캔이 찾아주겠지"라고 가정하면 안 된다 — `src/test`의 클래스는 기본적으로 스캔 제외 대상이다.
 컨텍스트에 넣고 싶은 테스트 전용 빈은 항상 `classes=`(또는 `@Import`)에 명시적으로 올려야 한다.
+
+### 10. 서비스 간 동기 호출 제거 확인 (2.3) — 죽은 포트 인터페이스 6개 삭제
+
+2.1에서 `OrderService.createOrder`/`PaymentService.requestPayment`의 실제 호출 지점(`
+ProductPriceLookup.findPrice`, `StockDeductionPort.deduct`, `OrderPort.findOrder`/`markPaid`)은
+이미 제거됐다. 2.3에서는 이게 전부인지 — 크로스 도메인 import, `implementation(project(":other-service"))`
+의존, 서비스 간 동기 HTTP 호출(RestTemplate/WebClient 등)이 남아있지 않은지 — 확인했다.
+
+**확인 방법과 결과**:
+- `rg "import org\.example\.cs_study\.(order|payment|inventory)\."`을 각 서비스 모듈에서
+  실행 → 자기 자신 패키지 외 다른 도메인 import 0건.
+- 각 서비스 `build.gradle.kts`의 `project(":...")` 의존을 전수 확인 → 전부 `common-*` 모듈
+  또는(payment-service 테스트 전용) `mock-pg-server`뿐, 서비스 모듈끼리는 전혀 의존하지 않음.
+- `RestTemplate`/`WebClient`/`RestClient`/`FeignClient`/`localhost:808[1-4]` 패턴 검색 →
+  `MockPgClient`(외부 Mock PG 호출, 도메인 서비스 아님) 1건뿐.
+
+**추가로 발견한 것 — 죽은 코드**: 위 인터페이스들(`StockDeductionPort`/`StockDeductionPortImpl`,
+`OrderPort`/`OrderPortImpl`, `ProductPriceLookup`/`ProductPriceLookupImpl`)과 그 반환
+DTO(`OrderView`, `ProductPrice`)는 2.1 이후 아무도 호출하지 않는 상태로 각자의 모듈(inventory-service,
+order-service) 안에 그대로 남아있었다. 멀티모듈 분리 전에는 "하위 패키지끼리 직접 의존하지
+않는다"는 원칙(CLAUDE.md)을 지키기 위한 장치였는데, 이제 order/payment/inventory가 물리적으로
+다른 Gradle 모듈이라 애초에 서로의 클래스를 import할 방법이 없다 — 이 인터페이스들이 존재해야
+할 이유 자체가 사라졌다. 6개 파일 전부 삭제했다(구현체/DTO 포함).
+
+2-B(Kafka Saga)에서 이 상호작용들은 이벤트 발행/구독으로 재구현되며, 그때는 Java 인터페이스가
+아니라 `common-event`의 이벤트 계약(`EventEnvelope` 등)을 통해서만 연결된다 — 삭제한 인터페이스
+패턴으로 돌아갈 일은 없다.
+
+**완료 기준 재확인**: 서비스 코드에 크로스 도메인 직접 호출 0건, 모듈 간 `project()` 의존 0건 —
+2.3의 DoD를 코드 변경 없이(순수 검증만으로) 충족한 상태에서, 검증 과정에서 발견한 죽은 코드를
+같은 PR에서 함께 정리했다.
