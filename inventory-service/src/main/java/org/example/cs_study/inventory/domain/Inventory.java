@@ -68,6 +68,31 @@ public class Inventory {
         this.available -= quantity;
     }
 
+    /**
+     * 2단계 예약→확정 모델(부록 A-4). {@code available -= n, reserved += n} — Saga가 진행
+     * 중인 동안 이 수량은 "팔렸지만 아직 확정 전"으로 남는다. 재고가 부족하면 {@link
+     * InsufficientStockException}을 던지고 아무것도 바꾸지 않는다(2.13에서 이 실패가
+     * {@code inventory.failed} 발행 → 보상 트랜잭션 개시로 이어진다).
+     */
+    public void reserve(int quantity) {
+        if (this.available < quantity) {
+            throw new InsufficientStockException(productId);
+        }
+        this.available -= quantity;
+        this.reserved += quantity;
+    }
+
+    /**
+     * 예약을 확정한다({@code reserved -= n}) — 예약된 수량은 이미 {@link #reserve}에서
+     * {@code available}을 빠져나갔으므로 여기서는 손대지 않는다. 2.12(정상 흐름)에서는
+     * {@link #reserve}와 확정을 같은 트랜잭션 안에서 바로 잇달아 호출한다 — 예약 이후
+     * 남은 정상 흐름 단계(알림)는 실패해도 이 예약을 되돌리지 않는 게 로드맵 방침이라
+     * (2.13 "알림 실패는 보상하지 않음"), 확정을 뒤로 미룰 이유가 없다.
+     */
+    public void confirm(int quantity) {
+        this.reserved -= quantity;
+    }
+
     @PrePersist
     void onCreate() {
         this.updatedAt = Instant.now();

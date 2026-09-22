@@ -4,12 +4,18 @@ plugins {
 
 dependencies {
     implementation(project(":common-web"))
+    implementation(project(":common-event"))
     implementation(project(":common-outbox"))
     implementation(project(":common-inbox"))
 
     // ---- Web / 기본 ----
     implementation("org.springframework.boot:spring-boot-starter-webmvc")
     implementation("org.springframework.boot:spring-boot-starter-validation")
+
+    // ---- Kafka (2.12: @KafkaListener) ----
+    // common-outbox가 이미 이 좌표를 갖고 있지만 Gradle의 implementation 가시성 규칙상
+    // 전이되지 않는다 — @KafkaListener/EventType을 이 모듈 코드에서 직접 쓰려면 직접 선언해야 한다.
+    implementation("org.springframework.kafka:spring-kafka")
 
     // ---- DB / 마이그레이션 ----
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")
@@ -37,4 +43,6 @@ dependencies {
     testImplementation("org.springframework.boot:spring-boot-testcontainers")
     testImplementation("org.testcontainers:testcontainers-junit-jupiter")
     testImplementation("org.testcontainers:testcontainers-postgresql")
+    // 2.12: @KafkaListener 통합 테스트(EmbeddedKafka, common-outbox OutboxRelayTest와 같은 패턴).
+    testImplementation("org.springframework.kafka:spring-kafka-test")
 }

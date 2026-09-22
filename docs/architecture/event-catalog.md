@@ -167,3 +167,43 @@ CI를 막습니다(`metavariable-type`으로 리시버가 `KafkaTemplate`인 호
 
 이것으로 2-B(Kafka 기반, 이슈 #51)가 끝났습니다. 2-C(Saga 오케스트레이션, 2.11~2.16)에서
 실제로 각 토픽을 발행/구독하는 로직을 붙입니다.
+
+## 구현 위치 (2.11)
+
+`order-service`에 `SagaInstance`/`SagaStep` 엔티티와 상태 전이 로직만 추가했습니다 — 아직
+어떤 리스너도 없고 `OrderService.createOrder()`도 손대지 않았습니다. 실제로 이 표의
+토픽들을 발행/구독하는 배선은 2.12부터입니다.
+
+## 구현 위치 (2.12)
+
+이 표의 8개 토픽이 전부 실제 `@KafkaListener`/`OutboxService.save()` 호출로 연결됐습니다 —
+이 프로젝트에서 처음으로 실제 Kafka 이벤트가 끝에서 끝까지(주문 생성 → 알림 발행) 흐릅니다.
+
+| 토픽 | 발행 지점 | 구독 지점 |
+|---|---|---|
+| `order.created` | `OrderService.createOrder()` | `inventory-service`의 `OrderCreatedListener`(로컬 읽기 모델 적재) |
+| `payment.requested` | `OrderService.createOrder()`(같은 트랜잭션) | `payment-service`의 `PaymentRequestedListener` |
+| `payment.completed` | `PaymentService.applyResult()` | `order-service`의 `PaymentCompletedListener`, `inventory-service`의 `PaymentCompletedListener` |
+| `payment.failed` | `PaymentService.applyResult()` | (2.13에서 구독 — 보상 트랜잭션) |
+| `inventory.reserved` | `inventory-service`의 `PaymentCompletedListener` | `order-service`의 `InventoryReservedListener` |
+| `inventory.failed` | `inventory-service`의 `PaymentCompletedListener`(재고 부족 시) | (2.13에서 구독) |
+| `order.cancelled` | (2.13에서 발행 — 보상 개시) | (2.13에서 구독) |
+| `notification.requested` | `order-service`의 `InventoryReservedListener` | `notification-service`의 `NotificationRequestedListener` |
+
+두 가지가 표의 "발행 서비스/구독 서비스" 열과 살짝 다릅니다 — 실제로 구현하면서 드러난
+부분이라 여기 기록합니다.
+
+1. **`payment.completed`를 order-service와 inventory-service가 둘 다 직접 구독합니다.**
+   order-service는 재고 예약을 별도로 지시하지 않습니다 — inventory-service가 이 토픽을
+   스스로 구독해 반응합니다(오케스트레이션이지만 이 한 지점만 이벤트 기반 반응, 로드맵이
+   원래 표에 이미 이렇게 적어뒀던 그대로입니다).
+2. **`inventory-service`가 `order.created`도 구독합니다.** `payment.completed` 페이로드에는
+   `productId`/`quantity`가 없습니다(Payment Service는 재고를 모른다는 서비스 경계,
+   로드맵 부록 G-2) — 그래서 inventory-service가 `order.created`로 "이 주문이 뭘 샀는지"를
+   미리 로컬 테이블(`order_line_item`)에 적어뒀다가 `payment.completed`가 오면 꺼내 씁니다.
+   원래 이 표는 이 구독을 명시하지 않았지만, 실제 배선 과정에서 필요해져 추가했습니다.
+
+설계 근거(가격을 클라이언트가 보내는 이유, 재고 확정을 예약과 같은 트랜잭션에서 바로
+하는 이유, notification-service가 처음 DB를 갖게 된 경위 등)는
+[troubleshooting/05-saga-orchestration.md](../troubleshooting/05-saga-orchestration.md)에
+있습니다.

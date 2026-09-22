@@ -5,6 +5,25 @@ spring:
   profiles:
     active: dev
 
+  datasource:
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+    # inventory-service와 물리 DB를 공유한다(README 방침, 2.2) — 기본 이력 테이블 이름을 그대로
+    # 쓰면 서로 다른 두 앱의 마이그레이션 세트가 한 이력에 뒤섞여 체크섬 충돌이 난다. 별도
+    # 이력 테이블로 이 앱의 버전 계보를 독립적으로 추적한다.
+    table: flyway_schema_history_notification
+
 server:
   port: 8084
   shutdown: graceful
