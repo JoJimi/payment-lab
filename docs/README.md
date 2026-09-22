@@ -25,7 +25,7 @@ CI/CD 설정 전문(부록 D), 파이프라인 운영(부록 E), 문서 체계(�
 |---|---|---|
 | `overview.md` | 시스템 다이어그램, 서비스 경계, 데이터 소유권 | 2단계 |
 | `erd.md` | 도메인 모델, 주문/결제/Saga 상태 전이표 | 1단계 |
-| `event-catalog.md` | 토픽·이벤트 스키마 명세 | 2단계 |
+| [`event-catalog.md`](architecture/event-catalog.md) | 토픽·이벤트 스키마 명세 | 2단계 ✅ |
 | `saga-flow.md` | 정상 흐름 + 보상 시나리오 | 2단계 |
 | `infrastructure.md` | 로컬 프로파일, K8s 구성 | 5단계 |
 
