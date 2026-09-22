@@ -171,3 +171,42 @@ V1/V2를 유지한 채 이력 테이블만 분리하는 절반짜리 수정은 �
 한 커밋 안에서 원자적으로 끝내거나(모든 서비스의 마이그레이션을 동시에 분리), 로컬 dev DB를
 `docker compose down -v`로 초기화하고 서비스별 DB/스키마로 새로 시작하는 방법 중 하나를 써야
 한다 — 2.2 착수 시 이 문서를 먼저 볼 것.
+
+---
+
+### 7. 결제 API를 "조용히 동작"에서 "명시적으로 거부"로 재설계 — `OrderValidator` 포트 + 멱등성 테스트 재배치
+
+CodeRabbit이 [PR #46 리뷰](https://github.com/JoJimi/payment-lab/pull/46)에서 지적한 4번째
+사항(§1과 연결): `PaymentService.requestPayment`가 주문 검증 없이 결제를 승인 처리하면
+존재하지 않는/금액이 안 맞는 주문에 대해 `payments` 행이 쌓이는 데이터 무결성 문제가 생긴다.
+1차 대응(§1)에서는 "결제 자체는 계속 동작하게 두자"고 판단했었는데, 사용자 검토 후 **명시적
+거부로 재설계**하기로 했다.
+
+**설계**: `payment-service` 안에 `OrderValidator` 포트(로컬 인터페이스, 모듈 간 아님)를
+새로 두고, 유일한 구현체 `UnimplementedOrderValidator`가 호출되면 항상
+`BusinessException(ErrorCode.NOT_IMPLEMENTED)`를 던진다. `requestPayment`는 이걸 메서드
+맨 앞에서 호출한다. 2-B에서 order-service와의 실제 연동(Kafka 이벤트 왕복 또는 REST)이
+생기면 `UnimplementedOrderValidator`를 실제 구현체로 교체하기만 하면 되고,
+`PaymentService`는 손댈 필요가 없다 — 이 프로젝트가 이미 쓰던 포트 패턴(`StockDeductionPort`,
+`ProductPriceLookup`, `OrderPort`)과 동일한 모양이다.
+
+**부수 효과 — 멱등성 테스트를 소유 모듈로 옮김**: `requestPayment`가 이제 항상 거부되므로,
+결제 흐름에 얹혀 있던 기존 동시성 테스트(로드맵 1.9/1.10,
+`PaymentIdempotencyConcurrencyTest`/`RedisDownTest`)로는 더 이상 "동시 요청 dedup"을 증명할
+수 없다(승인이라는 결과 자체가 없어졌으므로). `IdempotencyAspect`/`IdempotencyRecord`는
+애초에 "도메인 중립"이라고 스스로 문서화된 컴포넌트라(`IdempotencyRecord.java` Javadoc),
+그 계약을 검증하는 테스트도 특정 소비자가 아니라 소유 모듈(`common-idempotency`)이 들고
+있는 게 맞다고 판단했다:
+
+- `common-idempotency`에 `IdempotencyAspectConcurrencyTest`/`IdempotencyRedisDownTest`를
+  새로 추가 — 트리비얼한 카운터 메서드를 대상으로 원래 1.9/1.10과 같은 동시성 시나리오(100건
+  동시 요청 → 실행 1회, Redis 다운 시 DB 2차 방어)를 재현한다. 이 모듈은 지금까지 자기 자신의
+  테스트가 하나도 없었다(Explore 조사로 확인) — 이번에 처음 생긴다.
+- payment-service 쪽 두 테스트는 범위를 좁혀서 남긴다: (1) 거부가 `OrderValidator` 게이트에서
+  일관되게 발생하는지, (2) 거부된 요청이 idempotency 레코드를 "진행 중"으로 영구히 붙잡지
+  않는지(같은 키로 재시도해도 매번 독립적으로 거부되는지 — `IdempotencyAspect`가 예외를
+  캐시하지 않고 IN_PROGRESS 마킹을 지우는 동작의 payment-service 통합 관점 확인).
+
+**영향 범위**: `PaymentController`(`POST /api/payments`)는 지금 항상 501을 반환한다 —
+2-B 전까지는 의도된 동작이다. `common-idempotency`가 처음으로 Testcontainers(Postgres+Redis)
+의존 테스트를 갖게 돼 `gradle.lockfile` 재생성이 필요했다.

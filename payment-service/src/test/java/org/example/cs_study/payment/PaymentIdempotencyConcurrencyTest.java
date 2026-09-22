@@ -1,23 +1,15 @@
 package org.example.cs_study.payment;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.IOException;
 import java.math.BigDecimal;
-import java.util.List;
-import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.Callable;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
-import java.util.stream.IntStream;
+import org.example.cs_study.common.exception.BusinessException;
+import org.example.cs_study.common.exception.ErrorCode;
 import org.example.cs_study.mockpg.MockPgServer;
 import org.example.cs_study.payment.dto.request.RequestPaymentRequest;
-import org.example.cs_study.payment.dto.response.PaymentResponse;
 import org.example.cs_study.payment.repository.PaymentRepository;
 import org.example.cs_study.payment.service.PaymentService;
 import org.junit.jupiter.api.AfterAll;
@@ -33,8 +25,17 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
- * 로드맵 1.9 — "같은 키로 100개 동시 요청 → 승인 1건만, 나머지는 동일 응답".
- * 1.5의 Mock PG를 인프로세스(Docker 불필요)로 같이 띄워 실제 HTTP 왕복까지 포함해 검증한다.
+ * 2.1/2.3 — 원래 로드맵 1.9("같은 키로 100개 동시 요청 → 승인 1건만, 나머지는 동일 응답")는
+ * 이 클래스가 검증했다. payment-service가 2-B(Kafka Saga) 전까지 모든 결제 요청을 명시적으로
+ * 거부하게 되면서(CodeRabbit 리뷰, {@code PaymentService.requestPayment} Javadoc 참고)
+ * "승인 1건"이라는 시나리오 자체가 성립하지 않는다.
+ *
+ * <p>멱등성 메커니즘 자체(동시 요청 dedup, 실행 1회 보장)의 동시성 검증은
+ * {@code common-idempotency} 모듈의 {@code IdempotencyAspectConcurrencyTest}로 옮겼다 —
+ * 그 컴포넌트는 애초에 "도메인 중립"이라 특정 소비자(결제)의 비즈니스 로직에 얹혀 있을 이유가
+ * 없다. 이 클래스는 payment-service 통합 관점에서 남는 두 가지만 검증한다: (1) 거부가
+ * {@code OrderValidator} 게이트에서 일관되게 발생하는지, (2) 거부된 요청이 idempotency 레코드를
+ * "진행 중"으로 영구히 붙잡아두지 않는지(같은 키로 재시도해도 매번 같은 방식으로 거부되는지).
  */
 @Testcontainers
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
@@ -79,48 +80,33 @@ class PaymentIdempotencyConcurrencyTest {
     PaymentRepository paymentRepository;
 
     @Test
-    void 동일_멱등키로_100개_동시요청해도_승인은_한_건만_나고_나머지는_동일_응답이다() throws Exception {
-        BigDecimal amount = new BigDecimal("1000.0000");
-        String currency = "KRW";
-        // 2.1/2.3: PaymentService는 더 이상 order-service를 동기 호출로 검증하지 않는다
-        // (order-service가 별도 모듈로 분리됨 — PaymentService.requestPayment Javadoc 참고).
-        // orderId는 이 테스트(멱등성만 검증)에서는 임의 값으로 충분하다.
-        Long orderId = 1L;
+    void 주문_검증이_복원되기_전까지_결제_요청은_항상_명시적으로_거부된다() {
+        RequestPaymentRequest request = new RequestPaymentRequest(1L, new BigDecimal("1000.0000"), "KRW");
         String idempotencyKey = UUID.randomUUID().toString();
-        RequestPaymentRequest request = new RequestPaymentRequest(orderId, amount, currency);
-        int concurrency = 100;
 
-        // 풀 크기를 concurrency와 같게 잡는다 — 더 작으면 뒤에 밀린 태스크가 큐에서 시작조차
-        // 못 한 채로 앞선 태스크들이 go.await()에서 블로킹돼, ready가 0에 도달하지 못하고
-        // 매번 5초 타임아웃 후에야 진행된다(그마저도 "동시 100건"이 아니라 풀 크기만큼만 동시 실행됨).
-        ExecutorService pool = Executors.newFixedThreadPool(concurrency);
-        CountDownLatch ready = new CountDownLatch(concurrency);
-        CountDownLatch go = new CountDownLatch(1);
-        try {
-            List<Callable<PaymentResponse>> tasks = IntStream.range(0, concurrency)
-                    .<Callable<PaymentResponse>>mapToObj(i -> () -> {
-                        ready.countDown();
-                        go.await();
-                        return paymentService.requestPayment(idempotencyKey, request);
-                    })
-                    .collect(Collectors.toList());
+        assertThatThrownBy(() -> paymentService.requestPayment(idempotencyKey, request))
+                .isInstanceOf(BusinessException.class)
+                .extracting(e -> ((BusinessException) e).getErrorCode())
+                .isEqualTo(ErrorCode.NOT_IMPLEMENTED);
 
-            List<Future<PaymentResponse>> futures =
-                    tasks.stream().map(pool::submit).collect(Collectors.toList());
-            assertThat(ready.await(10, TimeUnit.SECONDS)).as("모든 스레드가 출발선에 도달해야 함").isTrue();
-            go.countDown();
+        // 거부된 요청은 결제 행을 남기면 안 된다 — 검증 없이 승인하는 것보다는 낫지만,
+        // 거부된 시도의 흔적이 남는 것도 데이터 무결성 관점에서 바람직하지 않다.
+        assertThat(paymentRepository.count()).isZero();
+    }
 
-            Set<Long> paymentIds = new java.util.HashSet<>();
-            for (Future<PaymentResponse> future : futures) {
-                PaymentResponse response = future.get(15, TimeUnit.SECONDS);
-                paymentIds.add(response.id());
-            }
+    @Test
+    void 거부된_요청은_멱등_레코드를_진행중_상태로_영구히_붙잡지_않는다() {
+        RequestPaymentRequest request = new RequestPaymentRequest(1L, new BigDecimal("1000.0000"), "KRW");
+        String idempotencyKey = UUID.randomUUID().toString();
 
-            // 동시에 100번 요청해도 실제로 생성된 결제는 하나뿐이어야 한다 (승인 1건).
-            assertThat(paymentIds).hasSize(1);
-            assertThat(paymentRepository.count()).isEqualTo(1);
-        } finally {
-            pool.shutdownNow();
+        // IdempotencyAspect는 예외를 캐시하지 않고 IN_PROGRESS 마킹을 지운다(재시도 허용).
+        // 같은 키로 3번 연속 호출해도 매번 독립적으로 같은 방식으로 거부돼야 한다 — 첫 시도가
+        // 레코드를 영구히 점유해 두 번째부터 IdempotencyInProgressException(409)으로 막히면 안 된다.
+        for (int i = 0; i < 3; i++) {
+            assertThatThrownBy(() -> paymentService.requestPayment(idempotencyKey, request))
+                    .isInstanceOf(BusinessException.class)
+                    .extracting(e -> ((BusinessException) e).getErrorCode())
+                    .isEqualTo(ErrorCode.NOT_IMPLEMENTED);
         }
     }
 }

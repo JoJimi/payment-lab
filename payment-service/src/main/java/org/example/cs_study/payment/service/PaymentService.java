@@ -20,16 +20,19 @@ import org.springframework.transaction.support.TransactionTemplate;
 public class PaymentService {
 
     private final PaymentRepository paymentRepository;
+    private final OrderValidator orderValidator;
     private final MockPgClient mockPgClient;
     private final MeterRegistry meterRegistry;
     private final TransactionTemplate transactionTemplate;
 
     public PaymentService(
             PaymentRepository paymentRepository,
+            OrderValidator orderValidator,
             MockPgClient mockPgClient,
             MeterRegistry meterRegistry,
             PlatformTransactionManager transactionManager) {
         this.paymentRepository = paymentRepository;
+        this.orderValidator = orderValidator;
         this.mockPgClient = mockPgClient;
         this.meterRegistry = meterRegistry;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
@@ -55,13 +58,18 @@ public class PaymentService {
      * 조회/검증하고, 승인 시 {@code orderPort.markPaid()}로 결제 승인과 같은 트랜잭션에서
      * 주문을 PAID로 전이시켰다. 멀티모듈 분리로 payment-service는 더 이상 order-service의
      * {@code OrderPort}를 (같은 JVM의) Java 인터페이스로 호출할 수 없어 두 호출을 모두 걷어냈다.
-     * 주문-결제 간 정합성(중복 결제 방지, 결제 승인 후 주문 상태 전이)은 2-B(Kafka Saga,
-     * 2.6~2.14)에서 이벤트 기반으로 재구현한다 — payment.requested/payment.completed 이벤트를
-     * order-service가 구독해 자신의 상태를 갱신하는 방식이 유력하다. 그 전까지 결제 자체(멱등성,
-     * PG 연동, 상태 전이)는 주문 상태와 독립적으로 계속 동작한다.
+     *
+     * <p>주문 검증은 {@link OrderValidator}로 옮겼다(지금은 {@link UnimplementedOrderValidator}
+     * 하나뿐 — 항상 거부). 검증 없이 결제를 승인하면 존재하지 않는 주문에 대해 {@code payments}
+     * 행이 쌓이는 데이터 무결성 문제가 생기므로(CodeRabbit 리뷰), 조용히 통과시키지 않고 여기서
+     * 명시적으로 막는다. 승인 후 주문 상태 전이(구 {@code markPaid})는 2-B(Kafka Saga,
+     * 2.6~2.14)에서 payment.completed 이벤트로 재구현한다 — order-service가 그 이벤트를
+     * 구독해 자신의 상태를 갱신하는 방식이 유력하다.
      */
     @Idempotent(key = "#idempotencyKey")
     public PaymentResponse requestPayment(String idempotencyKey, RequestPaymentRequest request) {
+        orderValidator.assertValid(request.orderId(), request.amount(), request.currency());
+
         Long paymentId = savePending(idempotencyKey, request);
 
         MockPgResult result = mockPgClient.requestPayment(idempotencyKey, request.amount(), request.currency());

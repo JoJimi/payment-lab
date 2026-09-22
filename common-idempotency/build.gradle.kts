@@ -8,4 +8,19 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-data-redis")
     implementation("org.springframework.boot:spring-boot-starter-json")
     implementation("io.micrometer:micrometer-core")
+
+    // ---- Test ----
+    // 2.1: 멱등성 메커니즘 자체(동시 요청 dedup, Redis 다운 내성)를 이 모듈에서 직접 검증한다.
+    // 이전엔 payment-service의 결제 흐름에 얹혀서만 검증됐는데(1.9/1.10), payment-service가
+    // 2-B 전까지 결제를 명시적으로 거부하게 되면서 더 이상 그 경로로는 증명이 안 된다 — 원래
+    // "도메인 중립"이라고 스스로 문서화한 컴포넌트이니 소유 모듈 안에서 직접 테스트하는 게 맞다.
+    testImplementation(platform("org.testcontainers:testcontainers-bom:2.0.5"))
+    testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testImplementation("org.springframework.boot:spring-boot-starter-data-jpa-test")
+    testImplementation("org.springframework.boot:spring-boot-testcontainers")
+    testImplementation("org.testcontainers:testcontainers-junit-jupiter")
+    testImplementation("org.testcontainers:testcontainers-postgresql")
+    testRuntimeOnly("org.postgresql:postgresql")
+    // Flyway 없이 ddl-auto=create-drop으로 idempotency_keys 테이블을 만든다 — 이 모듈의 테스트는
+    // 마이그레이션 자체가 아니라 AOP/Redis/DB dedup 동작을 검증하는 게 목적이라 굳이 안 끌어온다.
 }
