@@ -130,10 +130,16 @@ public record NotificationRequestedPayload(
 }
 ```
 
+## 구현 위치 (2.7)
+
+위 레코드들은 `common-event/src/main/java/org/example/cs_study/event/payload/`에 실제로
+정의돼 있습니다. 토픽명은 `EventType` enum으로 고정하고(문자열 리터럴 중복 방지),
+`EventEnvelopeFactory.create(EventType, payload)`가 `eventId`/`occurredAt`을 채우고
+발행 시점의 MDC에서 `traceId`를 읽어 봉투에 싣습니다. 컨슈머 쪽에서는
+`TraceContext.restore(traceId)`(try-with-resources)로 같은 traceId를 MDC에 복원합니다.
+
 ## 다음 단계
 
-- **2.7**: 위 레코드들을 `common-event` 모듈에 실제로 정의하고, 발행 시 `traceId`를
-  봉투에 채우는 지점 + 컨슈머에서 MDC로 복원하는 공통 로직을 구현합니다.
 - **2.8**: `outbox` 테이블(2.2에서 스켈레톤만 만들어둠)에 이 페이로드들을 넣는
   `OutboxService`와 폴링 릴레이를 구현합니다.
 - **2.9**: 각 컨슈머 서비스에 `processed_event(event_id)` 테이블을 추가해 중복 소비를
