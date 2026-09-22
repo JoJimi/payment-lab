@@ -270,7 +270,91 @@ Docker 없이 로컬에서 원인을 확정하려고, `common-idempotency`에 H2
 스캔이 찾아주겠지"라고 가정하면 안 된다 — `src/test`의 클래스는 기본적으로 스캔 제외 대상이다.
 컨텍스트에 넣고 싶은 테스트 전용 빈은 항상 `classes=`(또는 `@Import`)에 명시적으로 올려야 한다.
 
-### 10. 서비스 간 동기 호출 제거 확인 (2.3) — 죽은 포트 인터페이스 6개 삭제
+### 10. 서비스별 DB 분리 (2.2) — 공유 Flyway 이력 리스크를 근본 해결
+
+§6에서 지적된 "3개 서비스가 완전히 동일한 Flyway 마이그레이션을 공유 이력으로 실행" 문제를
+진짜 해법(서비스별 DB 분리)으로 해소했다. README 방침대로 Order/Payment는 각자 별도 DB,
+Inventory/Notification은 같은 DB를 공유하는 구조로 갔다.
+
+**변경 내용**:
+- `docker-compose.yml`의 단일 `postgres` 서비스를 `postgres-order`(5432) /
+  `postgres-payment`(5433) / `postgres-inventory`(5434) 3개로 분리. 16GB RAM 예산 안에서
+  `max_connections`/`shared_buffers`를 줄여 인스턴스 3개를 유지했다(부록 B).
+- 각 서비스 `application-dev.yml`의 datasource URL을 각자 DB로 갱신.
+- Flyway `V2__domain_schema.sql`을 서비스별 실제 소유 테이블만 남기도록 분리:
+  - `order-service`: `orders` + `outbox`(Order Service가 Saga 오케스트레이터 겸 이벤트 발행자)
+  - `payment-service`: `payments` + `idempotency_keys`(`common-idempotency`의 유일한 현재
+    소비자) + `outbox`
+  - `inventory-service`: `products` + `inventory` + `outbox`
+  - `notification-service`는 아직 JPA 엔티티가 없어(Explore 확인) datasource 자체를 붙이지
+    않았다 — 엔티티가 생기는 시점에 `postgres-inventory`를 공유하도록 연결할 예정.
+- 서비스 코드(order/payment/inventory 각 모듈)에 다른 도메인 패키지 import가 없음을
+  재확인했다 — 2.1에서 이미 크로스 도메인 결합을 제거해뒀기 때문에 DB 분리 자체는 순수하게
+  마이그레이션/설정 변경만으로 끝났다.
+
+**§6 대안 재평가**: §6에서 기각했던 두 대안("서비스별 `flyway.table` 분리", "일부 서비스
+Flyway 비활성화")이 지금은 필요 없어졌다 — 애초에 DB가 물리적으로 분리되니 `flyway_schema_history`
+자체가 서비스마다 자연스럽게 독립된다. 공유 이력 문제는 "고치는" 게 아니라 전제 자체가
+사라지며 해소됐다.
+
+**Testcontainers 테스트 영향 없음**: `PaymentIdempotency*Test`/`InventoryConcurrencyTest`/
+`ProductCacheStampedeTest` 등은 이미 각자 독립된 Testcontainers Postgres를 띄워 자기 모듈의
+`classpath:db/migration`만 적용받는 구조라(2.1 시점부터) 이번 분리로 테스트 코드 변경은
+필요 없었다 — 마이그레이션 파일 내용만 좁아졌다.
+
+**추가 수정 — DB 자격증명 평문 제거**: CodeRabbit이 이 PR에서 새로 지적한 항목이다. PR #46의
+DB_PASSWORD 기본값 지적(§는 없지만 PR #46 리뷰 스레드)은 "`docker-compose.yml`이 이미 같은
+평문 자격증명을 갖고 있어 애플리케이션 쪽만 고쳐도 실효성이 없다"는 이유로 반려했는데, 이번엔
+사정이 다르다 — 이 PR이 `docker-compose.yml` 자체를 직접 수정해서 Postgres 인스턴스를 3개로
+늘리며 평문 자격증명(`cs`/`cs123`)을 3곳으로 늘렸다. 더 이상 "손대지 않은 기존 파일"이 아니라
+이 PR이 직접 만든 문제라 반려 논리가 성립하지 않는다.
+
+`.env.example`(커밋됨, 플레이스홀더 값)을 추가하고, `docker-compose.yml`의 `POSTGRES_USER`/
+`POSTGRES_PASSWORD`와 세 서비스 `application-dev.yml`의 `DB_USERNAME`/`DB_PASSWORD`에서
+기본값을 전부 제거했다(`${VAR:?메시지}` 형태로 필수화). `.env`는 이미 `.gitignore`에 등록돼
+있었다 — `cp .env.example .env` 후 `docker compose up`으로 컴포즈는 자동으로 읽고,
+`./gradlew bootRun`으로 서비스를 직접 띄울 때는 `set -a && source ./.env && set +a`로
+셸에 내보내야 한다(README에 기록). `docker compose config`로 필수값 누락 시 명확한 에러로
+막히는 것과 값이 있을 때 정상 파싱되는 것 둘 다 로컬에서 확인했다.
+
+**추가 수정 — `.env.example`에 실제 값을 커밋해뒀던 문제**: 위 수정 직후 CodeRabbit이 다시
+잡아냈다. `.env.example`에 `DB_USERNAME=cs`/`DB_PASSWORD=cs123`을 그대로 적어 커밋해뒀는데,
+이러면 "필수 환경변수" 요구 자체가 무의미하다 — 저장소를 보는 누구나 그대로 복사해서 쓸 수
+있는 값이 저장소에 공개돼 있는 셈이다. `.env.example`의 두 값을 빈 문자열로 바꾸고, README
+안내도 "기본값 그대로 써도 됨"에서 "본인 로컬 값을 채울 것"으로 수정했다. 빈 문자열도
+`${VAR:?메시지}` 필수 검사를 여전히 통과하지 못하는 것(셸/Compose의 `:?`는 unset뿐 아니라
+빈 값도 잡는다)을 로컬에서 재확인했다.
+
+**추가 수정 — `.env` 로딩 커맨드가 공백/따옴표 포함 값에서 깨질 수 있었던 문제**: CodeRabbit이
+README/`.env.example`/세 서비스 `application-dev.yml` 주석에 적어둔
+`export $(grep -v '^#' .env | xargs)`를 지적했다. `xargs`는 공백으로 토큰을 나누기 때문에
+값에 공백이나 따옴표가 들어있으면 `export`에 엉뚱하게 쪼개진 인자가 전달된다(지금 값은 단순
+문자열이라 실제로는 안 깨지지만, 패턴 자체가 일반적으로 안전하지 않다). `set -a && source
+./.env && set +a`로 바꿨다 — `set -a`가 이후 정의되는 모든 셸 변수를 자동 export 대상으로
+표시하므로, `.env`를 평범한 셸 스크립트처럼 `source`하는 것만으로 안전하게 값을 내보낼 수
+있다.
+
+**반려 — "이미 적용된 V2 마이그레이션을 수정하지 마라"**: 같은 리뷰에서 order/payment/inventory
+서비스의 `V2__domain_schema.sql`을 이번 PR에서 직접 수정한 것(§10)에 대해 "Flyway
+`validate-on-migrate` 기본값이 `true`라 기존에 V2를 적용받은 DB에서 체크섬 불일치로 기동이
+실패한다"는 일반 원칙을 지적했다. 이 프로젝트 맥락에서는 반려한다 — 이유:
+- 이 스키마 변경으로 영향받는 DB는 로컬 개발용 docker-compose 볼륨뿐이다. 운영 환경이나
+  공유 환경에 이미 떠 있는 DB가 없다(1인 학습 프로젝트, 아직 배포 전 — 로드맵 5단계 이전).
+- §6/§10에서 이미 분석한 것과 같은 종류의 리스크다 — "진짜 위험 구간은 전환 중간 단계"라는
+  결론도 동일하게 적용된다. 이번 PR은 그 전환을 **한 커밋 안에서 원자적으로** 끝냈다(세
+  서비스의 마이그레이션을 동시에 분리) — §6이 미리 요구해둔 조건 그대로다.
+- 기존 로컬 볼륨과 체크섬이 충돌하면 `docker compose down -v`로 초기화하고 새 인스턴스
+  구성(postgres-order/payment/inventory)으로 다시 올리면 된다 — 어차피 이번 PR에서
+  `postgres` 단일 서비스를 3개로 쪼개면서 볼륨 이름 자체가 바뀌었으므로(`postgres_data` →
+  `postgres_order_data` 등) 기존 볼륨은 애초에 새 서비스에서 재사용되지 않는다. 체크섬
+  충돌 시나리오 자체가 이 PR에서는 발생하지 않는다.
+- "기존 V2를 그대로 두고 새 버전 마이그레이션을 추가하라"는 일반 원칙은 여러 서비스가 공유하는
+  운영 DB에서나 의미가 있다. 지금은 서비스별 DB 자체가 새로 생기는 시점이라(§10) 적용할
+  "기존 V2 이력"이 없다.
+
+---
+
+### 11. 서비스 간 동기 호출 제거 확인 (2.3) — 죽은 포트 인터페이스 6개 삭제
 
 2.1에서 `OrderService.createOrder`/`PaymentService.requestPayment`의 실제 호출 지점(`
 ProductPriceLookup.findPrice`, `StockDeductionPort.deduct`, `OrderPort.findOrder`/`markPaid`)은
