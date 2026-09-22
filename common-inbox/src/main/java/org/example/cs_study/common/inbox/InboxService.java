@@ -15,12 +15,11 @@ import org.springframework.transaction.annotation.Transactional;
  * 경계를 잡아야 한다 — {@code businessLogic}이 DB에 쓰는 작업과 {@code processed_event}
  * insert가 같은 트랜잭션에 묶여야, 처리는 됐는데 기록만 안 남거나 그 반대인 상황이 안 생긴다.
  *
- * <p>존재 확인과 저장 사이에 좁은 TOCTOU 창이 있다 — 정말 동시에 같은 eventId가 두 번
- * 들어오면 둘 다 존재 확인을 통과할 수 있다. Kafka 컨슈머 그룹에서 같은 파티션은 항상 같은
- * 인스턴스가 순차 처리하므로(리밸런싱 시점의 재처리는 순차적으로 일어남) 실제 동시성은
- * 낮다고 판단해 지금은 이 폭을 그대로 둔다 — {@code processed_event.event_id}가 PK라
- * 최악의 경우에도 두 번째 INSERT가 제약 위반으로 실패해 예외로 드러나지, 조용히 씹히지는
- * 않는다.
+ * <p>중복 선점은 {@link ProcessedEventRepository#insertIfAbsent}의 원자적 INSERT로 한다.
+ * 처음엔 "{@code existsById} 확인 후 {@code save}" 방식이었는데, 두 트랜잭션이 정말 동시에
+ * 같은 eventId로 들어오면 둘 다 확인을 통과해 비즈니스 로직이 두 번 실행될 수 있었다
+ * (CodeRabbit PR #60 리뷰 — TOCTOU). DB의 유니크 제약(PK)에 선점을 맡기면 두 트랜잭션 중
+ * 정확히 하나만 삽입에 성공하므로 이 창이 사라진다.
  */
 @Service
 public class InboxService {
@@ -36,11 +35,10 @@ public class InboxService {
      */
     @Transactional
     public boolean processIfNew(String eventId, Runnable businessLogic) {
-        if (processedEventRepository.existsById(eventId)) {
+        if (processedEventRepository.insertIfAbsent(eventId) == 0) {
             return false;
         }
         businessLogic.run();
-        processedEventRepository.save(new ProcessedEvent(eventId));
         return true;
     }
 }

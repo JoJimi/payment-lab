@@ -151,11 +151,11 @@ public record NotificationRequestedPayload(
 
 `common-inbox` 모듈(`InboxService`/`ProcessedEvent`)이 order/payment/inventory 각 서비스의
 `processed_event` 테이블(event_id를 PK로 직접 사용)에 처리 기록을 남깁니다.
-`InboxService.processIfNew(eventId, 비즈니스로직)`이 존재 확인 → 처리 → 기록을 한
-트랜잭션으로 묶습니다(`OutboxService`와 달리 스스로 트랜잭션을 엽니다 — Kafka 컨슈머
-콜백은 애초에 Spring이 트랜잭션을 열어주지 않는 진입점이라서). notification-service는
-아직 영속 대상이 없어(2.2) 이번에도 배선하지 않았습니다 — 실제 알림 로직을 구현하는
-시점(2-C/2-D)에 첫 DB 연결과 함께 다룹니다.
+`InboxService.processIfNew(eventId, 비즈니스로직)`이 원자적 선점(`INSERT ... ON CONFLICT
+DO NOTHING`) → 처리를 한 트랜잭션으로 묶습니다(`OutboxService`와 달리 스스로 트랜잭션을
+엽니다 — Kafka 컨슈머 콜백은 애초에 Spring이 트랜잭션을 열어주지 않는 진입점이라서).
+notification-service는 아직 영속 대상이 없어(2.2) 이번에도 배선하지 않았습니다 — 실제
+알림 로직을 구현하는 시점(2-C/2-D)에 첫 DB 연결과 함께 다룹니다.
 
 ## 다음 단계
 

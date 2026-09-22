@@ -3,7 +3,6 @@ package org.example.cs_study.common.inbox;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
-import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
 import java.time.Instant;
 import lombok.AccessLevel;
@@ -15,8 +14,10 @@ import lombok.NoArgsConstructor;
  * 기록한다. Kafka는 at-least-once라 같은 이벤트가 두 번 올 수 있다(로드맵 2단계 개요) —
  * 이 테이블에 존재하면 재처리하지 않고 건너뛴다({@link InboxService} 참고).
  *
- * <p>{@code eventId}를 PK로 직접 써서 유니크 제약을 별도로 걸 필요가 없게 했다 — 동시에
- * 같은 이벤트가 두 번 들어와도 두 번째 INSERT가 PK 충돌로 막힌다(경쟁 상태 방어).
+ * <p>실제 insert는 {@link ProcessedEventRepository#insertIfAbsent}의 원자적 네이티브 쿼리로
+ * 이뤄진다(CodeRabbit PR #60 리뷰 — existsById 후 save하는 방식은 동시 중복 요청에서 TOCTOU가
+ * 있었다) — 그래서 이 엔티티는 생성자/`@PrePersist`가 없다. JPA를 거쳐 만들어지는 레코드가
+ * 아니라, 조회(`existsById` 등 디버깅/조회 용도)를 위한 읽기 전용 매핑이다.
  */
 @Entity
 @Table(name = "processed_event")
@@ -30,13 +31,4 @@ public class ProcessedEvent {
 
     @Column(name = "processed_at", nullable = false)
     private Instant processedAt;
-
-    ProcessedEvent(String eventId) {
-        this.eventId = eventId;
-    }
-
-    @PrePersist
-    void onCreate() {
-        this.processedAt = Instant.now();
-    }
 }
