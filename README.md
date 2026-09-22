@@ -18,6 +18,20 @@
 
 ---
 
+## 로컬 개발 환경 설정
+
+DB 자격증명은 저장소에 평문으로 커밋하지 않습니다. 로컬에서 `docker-compose.yml`(PostgreSQL 인스턴스 3개)과 각 서비스(`application-dev.yml`)를 띄우기 전에:
+
+```bash
+cp .env.example .env            # 로컬 값으로 편집 가능, 기본값 그대로 써도 됨
+export $(grep -v '^#' .env | xargs)   # 서비스(./gradlew :order-service:bootRun 등)를 직접 띄울 때 필요
+docker compose up -d             # PostgreSQL 3개 + Redis
+```
+
+`.env`는 `.gitignore`에 등록돼 있어 커밋되지 않습니다. 자세한 내용은 `.env.example` 주석 참고.
+
+---
+
 ## 왜 이 기술 스택을 선택했는가
 
 기술을 먼저 정하고 프로젝트를 끼워 맞춘 게 아니라, "결제 시스템을 안전하게 만들려면 무엇이 필요한가"를 하나씩 따라가다 보니 자연스럽게 이 스택이 됐습니다.

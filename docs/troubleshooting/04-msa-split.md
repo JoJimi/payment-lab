@@ -301,3 +301,18 @@ Flyway 비활성화")이 지금은 필요 없어졌다 — 애초에 DB가 물�
 `ProductCacheStampedeTest` 등은 이미 각자 독립된 Testcontainers Postgres를 띄워 자기 모듈의
 `classpath:db/migration`만 적용받는 구조라(2.1 시점부터) 이번 분리로 테스트 코드 변경은
 필요 없었다 — 마이그레이션 파일 내용만 좁아졌다.
+
+**추가 수정 — DB 자격증명 평문 제거**: CodeRabbit이 이 PR에서 새로 지적한 항목이다. PR #46의
+DB_PASSWORD 기본값 지적(§는 없지만 PR #46 리뷰 스레드)은 "`docker-compose.yml`이 이미 같은
+평문 자격증명을 갖고 있어 애플리케이션 쪽만 고쳐도 실효성이 없다"는 이유로 반려했는데, 이번엔
+사정이 다르다 — 이 PR이 `docker-compose.yml` 자체를 직접 수정해서 Postgres 인스턴스를 3개로
+늘리며 평문 자격증명(`cs`/`cs123`)을 3곳으로 늘렸다. 더 이상 "손대지 않은 기존 파일"이 아니라
+이 PR이 직접 만든 문제라 반려 논리가 성립하지 않는다.
+
+`.env.example`(커밋됨, 플레이스홀더 값)을 추가하고, `docker-compose.yml`의 `POSTGRES_USER`/
+`POSTGRES_PASSWORD`와 세 서비스 `application-dev.yml`의 `DB_USERNAME`/`DB_PASSWORD`에서
+기본값을 전부 제거했다(`${VAR:?메시지}` 형태로 필수화). `.env`는 이미 `.gitignore`에 등록돼
+있었다 — `cp .env.example .env` 후 `docker compose up`으로 컴포즈는 자동으로 읽고,
+`./gradlew bootRun`으로 서비스를 직접 띄울 때는 `export $(grep -v '^#' .env | xargs)`로
+셸에 내보내야 한다(README에 기록). `docker compose config`로 필수값 누락 시 명확한 에러로
+막히는 것과 값이 있을 때 정상 파싱되는 것 둘 다 로컬에서 확인했다.
