@@ -80,6 +80,9 @@ class NotificationRequestedListenerTest {
     @Autowired
     SpringDataNotificationRepository notificationRepository;
 
+    @Autowired
+    org.example.cs_study.common.inbox.ProcessedEventRepository processedEventRepository;
+
     @Test
     void notification_requested를_받으면_알림_기록을_남긴다() {
         Long orderId = 888L;
@@ -92,6 +95,50 @@ class NotificationRequestedListenerTest {
         createProducer().send("notification.requested", orderId.toString(), json);
 
         awaitNotificationSaved(orderId);
+    }
+
+    /**
+     * 로드맵 2.18 — Kafka at-least-once 재전달로 같은 eventId가 그대로 두 번 오면 알림이
+     * 정확히 한 번만 생성되는지 확인한다. 두 번째 전달이 실제로 {@code notificationService.send}를
+     * 다시 실행했다면 같은 orderId로 알림 행이 2개 쌓였을 것이다(고객에게 알림이 두 번 가는
+     * 것과 동급 — 이 서비스에서 중복이 가장 눈에 띄게 드러나는 실패 모드다).
+     */
+    @Test
+    void notification_requested가_같은_eventId로_두_번_전달돼도_알림은_한_번만_생성된다() {
+        Long orderId = 889L;
+        NotificationRequestedPayload payload =
+                new NotificationRequestedPayload(orderId, NotificationType.ORDER_COMPLETED, "주문이 완료됐습니다");
+        var envelope = EventEnvelopeFactory.create(EventType.NOTIFICATION_REQUESTED, payload);
+        String json = objectMapper.writeValueAsString(envelope);
+
+        KafkaTemplate<String, String> producer = createProducer();
+        // 완전히 같은 메시지(같은 eventId)를 그대로 두 번 보낸다.
+        producer.send("notification.requested", orderId.toString(), json);
+        producer.send("notification.requested", orderId.toString(), json);
+
+        awaitEventProcessed(envelope.eventId());
+        awaitNotificationSaved(orderId);
+
+        long count = notificationRepository.findAll().stream()
+                .filter(n -> n.getOrderId().equals(orderId))
+                .count();
+        assertThat(count).isEqualTo(1);
+    }
+
+    private void awaitEventProcessed(String eventId) {
+        long deadline = System.currentTimeMillis() + Duration.ofSeconds(10).toMillis();
+        while (System.currentTimeMillis() < deadline) {
+            if (processedEventRepository.findById(eventId).isPresent()) {
+                return;
+            }
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            }
+        }
+        throw new AssertionError("eventId=" + eventId + "가 시간 내에 처리되지 않았습니다");
     }
 
     private KafkaTemplate<String, String> createProducer() {
