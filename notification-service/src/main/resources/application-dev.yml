@@ -17,8 +17,12 @@ spring:
 
   kafka:
     bootstrap-servers: localhost:9092
-    # 2.12: notification.requested 리스너. 이 서비스는 아무 토픽도 발행하지 않아(순수
-    # 소비자 — event-catalog.md) producer 설정이 필요 없다.
+    # 2.12: notification.requested 리스너. 이 서비스는 도메인 이벤트를 발행하지 않는다(순수
+    # 소비자 — event-catalog.md). producer 설정은 2.16의 DLQ 오류 처리기 전용이다 — 재시도를
+    # 소진한 메시지를 <토픽>.DLT로 보내려면 프로듀서가 있어야 한다(KafkaProducerConfig 참고).
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
     consumer:
       group-id: notification-service
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
