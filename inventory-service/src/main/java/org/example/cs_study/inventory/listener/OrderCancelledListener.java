@@ -56,7 +56,7 @@ public class OrderCancelledListener {
 
     private void handle(OrderCancelledPayload payload) {
         OrderLineItem lineItem = orderLineItemRepository
-                .findByOrderId(payload.orderId())
+                .findByOrderIdForUpdate(payload.orderId())
                 .orElseThrow(() -> new IllegalStateException(
                         "주문 라인아이템을 아직 못 찾았습니다(order.created 미처리 가능성) — 재시도 대상: orderId="
                                 + payload.orderId()));

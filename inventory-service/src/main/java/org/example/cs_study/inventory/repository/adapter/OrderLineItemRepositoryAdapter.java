@@ -24,4 +24,9 @@ class OrderLineItemRepositoryAdapter implements OrderLineItemRepository {
     public Optional<OrderLineItem> findByOrderId(Long orderId) {
         return springDataOrderLineItemRepository.findById(orderId);
     }
+
+    @Override
+    public Optional<OrderLineItem> findByOrderIdForUpdate(Long orderId) {
+        return springDataOrderLineItemRepository.findByOrderIdForUpdate(orderId);
+    }
 }
