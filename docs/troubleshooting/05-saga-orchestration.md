@@ -219,3 +219,121 @@ PG)가 필요해 이 원격 환경(Docker 없음)에서는 못 돌렸다. 컴파
 두 번 발행하는 테스트를 추가했다 — 둘 다 Docker가 필요해 이 원격 환경에서는 못 돌렸다.
 컴파일과 2.11의 순수 단위 테스트(도메인 상태 전이 규칙 — `@Version` 추가는 전이 규칙 자체를
 바꾸지 않는다) 재실행으로 회귀가 없음을 확인했다.
+
+### 5. Saga 타임아웃 처리 (2.15)
+
+**왜 필요한가 — 실패 이벤트 자체가 안 오는 경우**: 2.13/2.14는 "`payment.failed`/
+`inventory.failed`가 온다"는 것을 전제로 한다. 하지만 다운스트림 서비스가 그 이벤트를 아예
+못 보내는 상황도 있다 — payment-service가 크래시했거나, Mock PG 응답을 기다리다 프로세스가
+죽었거나, Kafka 메시지 자체가 유실되는 등. 이럴 땐 order-service 입장에서 아무 신호도 안
+와서 Saga가 `STARTED`에 영원히 멈춘다. `SagaInstance.timeoutAt`(2.11에서 이미 만들어둔
+컬럼, "이 시각을 넘겨도 STARTED에 머무르면 회수 대상"이라는 Javadoc)이 정확히 이 상황을
+위한 것이었다 — 2.15에서 실제로 회수하는 스케줄러를 붙인다.
+
+**`SagaTimeoutService`가 `PaymentFailedListener`/`InventoryFailedListener`와 로직이
+겹치는데 왜 합치지 않았나**: 셋 다 "스텝을 실패/보상 대상으로 표시 → `beginCompensation()`
+→ `SagaCompensationService.finish()`"라는 뒷부분은 같지만, 앞부분(어떤 스텝을 왜 실패로
+보는지)의 트리거가 다르다 — 리스너는 실제 이벤트 페이로드에서 이유를 읽고, 타임아웃은
+"응답이 안 왔다" 자체가 이유다. `currentStep`을 보고 `PAYMENT`/`INVENTORY` 중 어느 스텝이
+막혀 있었는지 스스로 판단해야 하는 것도 리스너들과 다르다(리스너는 어떤 스텝 얘기인지
+이벤트 토픽 자체가 알려준다). 공통된 뒷부분은 이미 `SagaCompensationService.finish()`로
+뽑혀 있으니 그걸 그대로 재사용했다.
+
+**`NOTIFICATION` 단계에서 타임아웃 회수가 시도되면 `FAILED`로 즉시 격리하는 이유**:
+`InventoryReservedListener`가 `notification.requested` 발행과 `sagaInstance.complete()`를
+같은 트랜잭션에서 묶어두므로(2.13), `currentStep`이 `NOTIFICATION`이면서 `status`가
+여전히 `STARTED`인 채로 스케줄러 폴링에 걸릴 창이 이론상 없다. 여기 걸린다는 건 그
+전제(같은 트랜잭션 보장) 자체가 깨졌다는 뜻이라, 처음엔 예외를 던져 드러내는 쪽을
+택했다. 그런데 예외로 트랜잭션이 롤백되면 `status`가 `STARTED`, `timeoutAt`이 과거인
+채로 그대로 남아 다음 폴링(기본 30초)마다 또 같은 Saga가 걸려 같은 ERROR 로그가 무한
+반복된다(CodeRabbit 리뷰, PR #71) — "진짜 버그를 드러낸다"는 의도가 "로그를 스팸으로
+만들어 정작 중요한 신호를 묻어버린다"는 부작용으로 뒤집힌다. 그래서 ERROR 로그는 한 번만
+남기고, Saga 자체는 `beginCompensation()`→`failCompensation()`으로 즉시 `FAILED`(종결
+상태)로 격리해 더 이상 폴링 대상에서 빠지게 했다 — 여전히 아무것도 자동으로 보상하지
+않고(이 케이스는 애초에 "무슨 일이 있었는지 모르는" 상황이라 섣불리 주문을 취소하면
+오히려 위험할 수 있다), 사람이 들여다봐야 한다는 신호만 명확히 남긴다. 이렇게 격리된
+`FAILED` Saga를 체계적으로 재처리하는 방법은 2.16(DLQ)의 몫이다.
+
+**타임아웃 값을 상수에서 `@Value` 설정으로 바꾼 이유**: 2.12에서 10분 고정 상수로
+남겨뒀던 이유가 "2.15에서 스케줄러가 이 값을 근거로 회수한다"였다 — 실제로 스케줄러를
+테스트하려면 10분을 기다릴 수 없으니, `app.saga.timeout-minutes`로 빼서 테스트가 0분(즉시
+회수 대상)으로 주입할 수 있게 했다. `OutboxRelay`의 `app.outbox.relay.fixed-delay-ms`
+패턴을 그대로 따랐다.
+
+**스케줄러가 Saga 하나의 회수 실패로 전체가 멈추지 않게 한 이유**: `OutboxRelay`가 발행
+실패를 이벤트별로 삼키고 넘어가는 것과 같은 이유다 — `SagaTimeoutScheduler.
+reclaimTimedOutSagas()`는 `@Transactional`이 아니고, `SagaTimeoutService.reclaim()`을
+Saga별로 개별 호출하면서 예외를 잡아 로깅만 한다. 하나가 실패해도(트랜잭션이 롤백돼
+`timeoutAt`을 여전히 넘긴 채로 남으므로) 다음 폴링에서 다시 시도되고, 나머지 Saga의
+회수를 막지 않는다.
+
+**알려진 한계 — PAYMENT 타임아웃이 실제로는 승인된 결제를 취소해버릴 수 있다**:
+`SagaTimeoutService`는 order-service의 로컬 상태(응답이 안 왔다는 사실)만 보고 판단한다 —
+payment-service에 "이 결제 실제로 어떻게 됐냐"고 재조회하지 않는다. 그런데 Mock PG가
+`TIMEOUT`(결과를 알 수 없음)으로 응답하면 `Payment`는 `UNKNOWN` 상태로 남고 `payment.
+completed`도 `payment.failed`도 발행되지 않는다(`PaymentService.applyResult` Javadoc) —
+이 경우 실제로는 PG가 승인했을 수도 있는데, order-service는 "응답이 없다"는 것만 보고
+주문을 취소해버릴 수 있다. 돈은 나갔는데 주문은 취소된 상태가 되는 것이다.
+
+이건 2.15의 결함이 아니라 `PaymentStatus.UNKNOWN`이 원래부터 "실제 조회로 해소하기
+전까지는 아무것도 단정하지 않는다"는 설계이기 때문이다(`PaymentStatus.markUnknown`/
+`resolveFromUnknown` Javadoc, "UNKNOWN 상태를 재조회 결과로 확정한다 — 3.4에서 실제 조회
+로직 연결 예정"). 2.15는 "실패 이벤트 자체가 안 오는 상황에 대한 마지막 방어선"이지,
+UNKNOWN을 실제로 해소하는 재조회 시스템이 아니다 — 그건 로드맵이 이미 3.4로 분리해둔
+별도 태스크다(CodeRabbit 리뷰, PR #71 — 이 한계를 지적받아 여기 명시적으로 기록한다).
+3.4가 들어오면 `SagaTimeoutService`도 "무작정 실패 처리" 대신 "먼저 실제 상태를 재조회"로
+바뀌어야 한다.
+
+**같은 한계의 다른 얼굴 — `cancelForOrder()`의 TOCTOU도 같은 이유로 지금은 닫지 않는다**:
+CodeRabbit이 이어서 지적한 부분이다(PR #71) — `order.cancelled`가 도착했을 때 결제가 아직
+없거나(`payment.requested` 자체가 지연 중) `PENDING`이면 `PaymentService.cancelForOrder()`는
+`APPROVED`인 결제만 취소하므로 조용히 넘어간다. 그 뒤 지연됐던 결제가 뒤늦게 `APPROVED`로
+확정되면 `payment.completed`가 발행되지만, 이미 취소된 주문이라 아무도 그 결제를 취소/환불
+하지 않는다 — INVENTORY 쪽에서 고친 것과 같은 모양의 레이스다.
+
+INVENTORY와 다르게 이건 바로 고치지 않았다: 제대로 닫으려면 결제 서비스에 "이 주문은
+취소됐다"는 의도를 Payment 행의 존재 여부와 무관하게 영속화하고, `requestPaymentFromSaga`/
+`applyResult`(Mock PG 호출이 트랜잭션 밖에 있는 삼단 구조, `PaymentService` Javadoc)가 그
+의도를 확인해 늦게 승인된 결제를 취소하거나 환불해야 한다 — 새 테이블/마이그레이션과
+두 트랜잭션 경계에 걸친 로직이 필요한 별도 작업이다. 게다가 이 마무리 없이 "취소된
+주문이면 무조건 실패 처리"만 얹으면, 실제로는 PG가 승인했을 수도 있는 결제를 재조회 없이
+단정하는 셈이라 위 PAYMENT/UNKNOWN 한계와 똑같은 문제를 새로 만든다 — 결국 제대로 닫으려면
+3.4의 실제 PG 상태 조회가 먼저 필요하다. 그래서 이것도 3.4 범위로 미루고 여기 한계로
+기록한다.
+
+**(정정) INVENTORY 타임아웃에서 "커밋된 재고를 복구"할 필요가 없다고 했던 것은 틀렸다**:
+처음엔 이렇게 판단했었다 — "inventory-service는 `reserve()`와 `confirm()`을 같은 로컬
+트랜잭션에서 잇달아 호출하므로(2.12), 그 트랜잭션이 커밋 안 되면(크래시 등) 재고 변경도
+함께 롤백된다. 즉 '재고는 깎였는데 `inventory.reserved` 확인만 못 받은' 상태는 존재할 수
+없다." 이 추론은 **"로컬 DB 트랜잭션이 원자적이다"와 "그 사실이 다른 서비스에 제때
+전달된다"를 같은 것으로 착각했다** — Transactional Outbox 패턴(2.8)에서는 이 둘이 분리돼
+있다. `reserve()`+`confirm()`+Outbox 행 적재는 분명 한 트랜잭션에서 원자적으로 끝나지만,
+그 Outbox 행을 실제로 Kafka에 발행하는 건 `OutboxRelay`의 **별도 폴링 주기**다 — 로컬
+커밋과 `inventory.reserved` 발행 사이에는 진짜 시간차가 있다. `SagaTimeoutScheduler`는
+그 창을 볼 방법이 없다 — order-service 로컬 상태(응답이 안 왔다는 사실)만 보고 판단하기
+때문에, inventory-service가 이미 재고를 확정해버렸는데도 "응답이 없으니 실패로 간주"하고
+주문을 취소할 수 있다. CodeRabbit이 최초 반박에서 이 착각을 정확히 짚어냈다(PR #71).
+
+**수정**: `OrderLineItem`에 `reserved`/`cancelled` 두 플래그를 추가했다(V5 마이그레이션).
+`PaymentCompletedListener`가 예약+확정에 성공하면 `reserved=true`로 표시하고,
+새로 추가한 inventory-service의 `OrderCancelledListener`가 `order.cancelled`를 받아
+`reserved=true`인 라인아이템만 `Inventory.release()`(신규, `available += n`)로 되돌린다.
+`order.cancelled`와 `payment.completed`는 서로 다른 토픽이라 어느 쪽이 먼저 올지 Kafka가
+보장하지 않으므로, 취소가 예약보다 먼저 도착하는 순서 역전은 `cancelled` 플래그로 막는다
+— `OrderCancelledListener`가 먼저 `cancelled=true`를 남겨두면, 뒤늦게 오는
+`PaymentCompletedListener`가 그 라인아이템을 보고 예약 자체를 건너뛴다(예약했다가 바로
+되돌릴 이유가 없다).
+
+같은 레이스가 order-service 쪽에도 있었다 — 타임아웃이 먼저 Saga를 COMPLETED로 끝내버린
+뒤 뒤늦게 `inventory.reserved`가 도착하면, `InventoryReservedListener`가 이미 끝난 Saga를
+다시 전이시키려다 `SagaStatus.canTransitionTo`에 막혀 예외를 던지고 무한 재시도로
+이어질 수 있었다. 2.14의 상태 가드와 같은 패턴(`status != STARTED`면 조용히 무시)을
+여기도 추가했다.
+
+**로컬에서 실제로 검증한 것**: `SagaTimeoutSchedulerTest`(Postgres만, Kafka 불필요 — 스케줄러는
+로컬 DB 상태만 보고 판단한다) 2케이스 — PAYMENT 단계 타임아웃(스텝 자체가 한 번도 응답을
+못 받은 경우), INVENTORY 단계 타임아웃(결제는 성공했는데 재고 응답이 안 온 경우, 리스너
+없이 그 최종 상태를 테스트가 직접 재현). 둘 다 Docker가 필요해 이 원격 환경에서는 못
+돌렸다. 컴파일 전체 모듈 통과와 2.11의 순수 단위 테스트 재실행으로 회귀가 없음을 확인했다
+— inventory-service의 release 경로 자체에 대한 통합 테스트는 아직 없다(Kafka가 필요해
+이 원격 환경에서 작성/실행이 어렵다는 같은 제약).

@@ -10,6 +10,7 @@ import org.example.cs_study.event.payload.InventoryReservedPayload;
 import org.example.cs_study.event.payload.NotificationRequestedPayload;
 import org.example.cs_study.event.payload.NotificationType;
 import org.example.cs_study.order.domain.saga.SagaInstance;
+import org.example.cs_study.order.domain.saga.SagaStatus;
 import org.example.cs_study.order.domain.saga.SagaStep;
 import org.example.cs_study.order.domain.saga.SagaStepName;
 import org.example.cs_study.order.repository.SagaInstanceRepository;
@@ -65,6 +66,15 @@ public class InventoryReservedListener {
         SagaInstance sagaInstance = sagaInstanceRepository
                 .findByOrderId(payload.orderId())
                 .orElseThrow(() -> new IllegalStateException("Saga 인스턴스를 찾을 수 없습니다: orderId=" + payload.orderId()));
+        if (sagaInstance.getStatus() != SagaStatus.STARTED) {
+            // SagaTimeoutService(2.15)가 이 이벤트보다 먼저 타임아웃으로 이 Saga를 이미
+            // COMPENSATING/COMPLETED로 끝내버렸을 수 있다 — Outbox 발행이 로컬 커밋과 분리돼
+            // 있어(2.8) 생기는 같은 종류의 레이스(inventory-service의 OrderCancelledListener
+            // Javadoc 참고, CodeRabbit 리뷰 PR #71). 이미 끝난 Saga를 다시 전이시키려 하면
+            // SagaStatus.canTransitionTo가 막아 예외가 나고 무한 재시도로 이어지므로 여기서
+            // 조용히 무시한다 — 재고는 OrderCancelledListener가 이미 되돌렸거나 되돌릴 것이다.
+            return;
+        }
         // order-service는 inventory-service에 별도 커맨드를 보내지 않는다(위 클래스 Javadoc) —
         // 재고 예약은 inventory-service가 payment.completed를 직접 구독해 자율적으로 수행한
         // 결과다. 그래서 이 스텝은 order-service 입장에서 "요청"이 따로 없고, inventory.reserved

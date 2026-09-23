@@ -18,6 +18,7 @@ import org.example.cs_study.order.dto.response.OrderResponse;
 import org.example.cs_study.order.repository.OrderRepository;
 import org.example.cs_study.order.repository.SagaInstanceRepository;
 import org.example.cs_study.order.repository.SagaStepRepository;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.ObjectMapper;
@@ -33,26 +34,34 @@ import tools.jackson.databind.ObjectMapper;
 @Service
 public class OrderService {
 
-    /** 2.15에서 실제 타임아웃 스케줄러가 이 값을 근거로 지연된 Saga를 회수한다. 지금은 상수. */
-    private static final Duration SAGA_TIMEOUT = Duration.ofMinutes(10);
-
     private final OrderRepository orderRepository;
     private final SagaInstanceRepository sagaInstanceRepository;
     private final SagaStepRepository sagaStepRepository;
     private final OutboxService outboxService;
     private final ObjectMapper objectMapper;
+    private final Duration sagaTimeout;
 
     public OrderService(
             OrderRepository orderRepository,
             SagaInstanceRepository sagaInstanceRepository,
             SagaStepRepository sagaStepRepository,
             OutboxService outboxService,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper,
+            // 2.15: 테스트가 짧은 타임아웃으로 SagaTimeoutScheduler를 검증할 수 있도록
+            // 설정 가능하게 뺐다 — 실제 운영값은 기본 10분.
+            @Value("${app.saga.timeout-minutes:10}") long sagaTimeoutMinutes) {
+        // 음수가 설정되면 timeoutAt이 과거 시각이 돼 모든 신규 주문이 생성 직후 스케줄러에
+        // 의해 조용히 취소된다(CodeRabbit 리뷰, PR #71) — 설정 오류를 기본값으로 덮지 않고
+        // 즉시 기동을 막는다. 0은 테스트가 쓰므로 허용한다.
+        if (sagaTimeoutMinutes < 0) {
+            throw new IllegalArgumentException("app.saga.timeout-minutes는 0 이상이어야 합니다: " + sagaTimeoutMinutes);
+        }
         this.orderRepository = orderRepository;
         this.sagaInstanceRepository = sagaInstanceRepository;
         this.sagaStepRepository = sagaStepRepository;
         this.outboxService = outboxService;
         this.objectMapper = objectMapper;
+        this.sagaTimeout = Duration.ofMinutes(sagaTimeoutMinutes);
     }
 
     @Transactional
@@ -62,7 +71,7 @@ public class OrderService {
         Order order = new Order(request.productId(), request.quantity(), totalAmount, request.currency());
         order = orderRepository.save(order);
 
-        SagaInstance sagaInstance = new SagaInstance(order.getId(), Instant.now().plus(SAGA_TIMEOUT));
+        SagaInstance sagaInstance = new SagaInstance(order.getId(), Instant.now().plus(sagaTimeout));
         sagaInstance.advanceTo(SagaStepName.PAYMENT);
         sagaInstance = sagaInstanceRepository.save(sagaInstance);
 
