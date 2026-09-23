@@ -239,12 +239,20 @@ PG)가 필요해 이 원격 환경(Docker 없음)에서는 못 돌렸다. 컴파
 이벤트 토픽 자체가 알려준다). 공통된 뒷부분은 이미 `SagaCompensationService.finish()`로
 뽑혀 있으니 그걸 그대로 재사용했다.
 
-**`NOTIFICATION` 단계에서 타임아웃 회수가 시도되면 조용히 넘기지 않고 예외를 던지는
-이유**: `InventoryReservedListener`가 `notification.requested` 발행과
-`sagaInstance.complete()`를 같은 트랜잭션에서 묶어두므로(2.13), `currentStep`이
-`NOTIFICATION`이면서 `status`가 여전히 `STARTED`인 채로 스케줄러 폴링에 걸릴 창이 이론상
-없다. 여기 걸린다는 건 그 전제(같은 트랜잭션 보장) 자체가 깨졌다는 뜻이라, 방어적으로
-빈 처리를 하기보다 예외로 드러내는 쪽을 택했다 — 잘못 삼키면 진짜 버그를 놓친다.
+**`NOTIFICATION` 단계에서 타임아웃 회수가 시도되면 `FAILED`로 즉시 격리하는 이유**:
+`InventoryReservedListener`가 `notification.requested` 발행과 `sagaInstance.complete()`를
+같은 트랜잭션에서 묶어두므로(2.13), `currentStep`이 `NOTIFICATION`이면서 `status`가
+여전히 `STARTED`인 채로 스케줄러 폴링에 걸릴 창이 이론상 없다. 여기 걸린다는 건 그
+전제(같은 트랜잭션 보장) 자체가 깨졌다는 뜻이라, 처음엔 예외를 던져 드러내는 쪽을
+택했다. 그런데 예외로 트랜잭션이 롤백되면 `status`가 `STARTED`, `timeoutAt`이 과거인
+채로 그대로 남아 다음 폴링(기본 30초)마다 또 같은 Saga가 걸려 같은 ERROR 로그가 무한
+반복된다(CodeRabbit 리뷰, PR #71) — "진짜 버그를 드러낸다"는 의도가 "로그를 스팸으로
+만들어 정작 중요한 신호를 묻어버린다"는 부작용으로 뒤집힌다. 그래서 ERROR 로그는 한 번만
+남기고, Saga 자체는 `beginCompensation()`→`failCompensation()`으로 즉시 `FAILED`(종결
+상태)로 격리해 더 이상 폴링 대상에서 빠지게 했다 — 여전히 아무것도 자동으로 보상하지
+않고(이 케이스는 애초에 "무슨 일이 있었는지 모르는" 상황이라 섣불리 주문을 취소하면
+오히려 위험할 수 있다), 사람이 들여다봐야 한다는 신호만 명확히 남긴다. 이렇게 격리된
+`FAILED` Saga를 체계적으로 재처리하는 방법은 2.16(DLQ)의 몫이다.
 
 **타임아웃 값을 상수에서 `@Value` 설정으로 바꾼 이유**: 2.12에서 10분 고정 상수로
 남겨뒀던 이유가 "2.15에서 스케줄러가 이 값을 근거로 회수한다"였다 — 실제로 스케줄러를
@@ -258,6 +266,32 @@ reclaimTimedOutSagas()`는 `@Transactional`이 아니고, `SagaTimeoutService.re
 Saga별로 개별 호출하면서 예외를 잡아 로깅만 한다. 하나가 실패해도(트랜잭션이 롤백돼
 `timeoutAt`을 여전히 넘긴 채로 남으므로) 다음 폴링에서 다시 시도되고, 나머지 Saga의
 회수를 막지 않는다.
+
+**알려진 한계 — PAYMENT 타임아웃이 실제로는 승인된 결제를 취소해버릴 수 있다**:
+`SagaTimeoutService`는 order-service의 로컬 상태(응답이 안 왔다는 사실)만 보고 판단한다 —
+payment-service에 "이 결제 실제로 어떻게 됐냐"고 재조회하지 않는다. 그런데 Mock PG가
+`TIMEOUT`(결과를 알 수 없음)으로 응답하면 `Payment`는 `UNKNOWN` 상태로 남고 `payment.
+completed`도 `payment.failed`도 발행되지 않는다(`PaymentService.applyResult` Javadoc) —
+이 경우 실제로는 PG가 승인했을 수도 있는데, order-service는 "응답이 없다"는 것만 보고
+주문을 취소해버릴 수 있다. 돈은 나갔는데 주문은 취소된 상태가 되는 것이다.
+
+이건 2.15의 결함이 아니라 `PaymentStatus.UNKNOWN`이 원래부터 "실제 조회로 해소하기
+전까지는 아무것도 단정하지 않는다"는 설계이기 때문이다(`PaymentStatus.markUnknown`/
+`resolveFromUnknown` Javadoc, "UNKNOWN 상태를 재조회 결과로 확정한다 — 3.4에서 실제 조회
+로직 연결 예정"). 2.15는 "실패 이벤트 자체가 안 오는 상황에 대한 마지막 방어선"이지,
+UNKNOWN을 실제로 해소하는 재조회 시스템이 아니다 — 그건 로드맵이 이미 3.4로 분리해둔
+별도 태스크다(CodeRabbit 리뷰, PR #71 — 이 한계를 지적받아 여기 명시적으로 기록한다).
+3.4가 들어오면 `SagaTimeoutService`도 "무작정 실패 처리" 대신 "먼저 실제 상태를 재조회"로
+바뀌어야 한다.
+
+**INVENTORY 타임아웃에서 "커밋된 재고를 복구"할 필요가 없는 이유(CodeRabbit이 같은
+코멘트에서 함께 지적한 부분)**: 위 PAYMENT/UNKNOWN 한계와 달리 이쪽은 실제 결함이
+아니다 — inventory-service는 `reserve()`와 `confirm()`을 같은 로컬 트랜잭션에서 잇달아
+호출한다(2.12) — 이 트랜잭션이 커밋되지 못하면(크래시 등) DB 트랜잭션 원자성 자체가
+재고 변경도 함께 롤백시킨다. 즉 "재고는 실제로 깎였는데 `inventory.reserved` 확인만
+못 받은" 상태 자체가 이 설계에서는 존재할 수 없다(바로 위 "`inventory.failed`가 와도
+inventory-service에 아무것도 요청하지 않는 이유" 항목과 같은 근거). 복구할 대상이
+없으므로 복구 로직도 필요 없다.
 
 **로컬에서 실제로 검증한 것**: `SagaTimeoutSchedulerTest`(Postgres만, Kafka 불필요 — 스케줄러는
 로컬 DB 상태만 보고 판단한다) 2케이스 — PAYMENT 단계 타임아웃(스텝 자체가 한 번도 응답을

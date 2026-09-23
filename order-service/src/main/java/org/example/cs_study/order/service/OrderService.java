@@ -50,6 +50,12 @@ public class OrderService {
             // 2.15: 테스트가 짧은 타임아웃으로 SagaTimeoutScheduler를 검증할 수 있도록
             // 설정 가능하게 뺐다 — 실제 운영값은 기본 10분.
             @Value("${app.saga.timeout-minutes:10}") long sagaTimeoutMinutes) {
+        // 음수가 설정되면 timeoutAt이 과거 시각이 돼 모든 신규 주문이 생성 직후 스케줄러에
+        // 의해 조용히 취소된다(CodeRabbit 리뷰, PR #71) — 설정 오류를 기본값으로 덮지 않고
+        // 즉시 기동을 막는다. 0은 테스트가 쓰므로 허용한다.
+        if (sagaTimeoutMinutes < 0) {
+            throw new IllegalArgumentException("app.saga.timeout-minutes는 0 이상이어야 합니다: " + sagaTimeoutMinutes);
+        }
         this.orderRepository = orderRepository;
         this.sagaInstanceRepository = sagaInstanceRepository;
         this.sagaStepRepository = sagaStepRepository;

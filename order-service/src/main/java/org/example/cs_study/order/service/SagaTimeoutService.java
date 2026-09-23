@@ -6,6 +6,8 @@ import org.example.cs_study.order.domain.saga.SagaStep;
 import org.example.cs_study.order.domain.saga.SagaStepName;
 import org.example.cs_study.order.repository.SagaInstanceRepository;
 import org.example.cs_study.order.repository.SagaStepRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -18,6 +20,8 @@ import org.springframework.transaction.annotation.Transactional;
  */
 @Service
 public class SagaTimeoutService {
+
+    private static final Logger log = LoggerFactory.getLogger(SagaTimeoutService.class);
 
     private final SagaInstanceRepository sagaInstanceRepository;
     private final SagaStepRepository sagaStepRepository;
@@ -44,20 +48,32 @@ public class SagaTimeoutService {
         }
 
         SagaStepName currentStep = sagaInstance.getCurrentStep();
-        String reason = "SAGA_TIMEOUT: " + currentStep + " 단계 응답이 시간 내에 오지 않았습니다";
+        if (currentStep == SagaStepName.NOTIFICATION) {
+            // InventoryReservedListener가 notification.requested 발행과
+            // sagaInstance.complete()를 같은 트랜잭션에서 묶어두기 때문에(2.13), currentStep이
+            // NOTIFICATION이면서 status가 STARTED로 남는 창이 이론상 없다 — 여기 걸리면 그
+            // 전제가 깨진 것이다. 예외를 던져 트랜잭션을 롤백시키면 timeoutAt이 과거인 채로
+            // 남아 다음 폴링마다 또 걸려 같은 로그가 무한 반복된다(CodeRabbit 리뷰, PR #71) —
+            // 대신 이 Saga를 즉시 FAILED로 격리해 더 이상 폴링 대상에서 빠지게 하고, 수동
+            // 조사가 필요하다는 걸 ERROR 로그 한 번으로 남긴다. 2.16(DLQ)에서 이런 격리 상태를
+            // 체계적으로 재처리하는 방법을 다룬다.
+            log.error(
+                    "NOTIFICATION 단계에서 타임아웃 회수가 시도됐습니다(불변식 위반 의심) — 수동 조사가 필요합니다: sagaId={}",
+                    sagaId);
+            sagaInstance.beginCompensation();
+            sagaInstance.failCompensation();
+            sagaInstanceRepository.save(sagaInstance);
+            return;
+        }
 
+        String reason = "SAGA_TIMEOUT: " + currentStep + " 단계 응답이 시간 내에 오지 않았습니다";
         switch (currentStep) {
             case PAYMENT -> failStep(sagaId, SagaStepName.PAYMENT, reason);
             case INVENTORY -> {
                 compensateStep(sagaId, SagaStepName.PAYMENT);
                 failStep(sagaId, SagaStepName.INVENTORY, reason);
             }
-            case NOTIFICATION -> throw new IllegalStateException(
-                    // InventoryReservedListener가 notification.requested 발행과
-                    // sagaInstance.complete()를 같은 트랜잭션에서 묶어두기 때문에(2.13),
-                    // currentStep이 NOTIFICATION이면서 status가 STARTED로 남는 창이 이론상
-                    // 없다 — 여기 걸리면 그 전제가 깨진 것이므로 조용히 넘기지 않고 드러낸다.
-                    "NOTIFICATION 단계에서 타임아웃 회수가 시도됐습니다(불변식 위반 의심): sagaId=" + sagaId);
+            default -> throw new IllegalStateException("도달할 수 없습니다(NOTIFICATION은 위에서 이미 처리됨): " + currentStep);
         }
 
         sagaInstance.beginCompensation();

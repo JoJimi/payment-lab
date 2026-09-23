@@ -35,6 +35,7 @@ class SagaInstanceRepositoryAdapter implements SagaInstanceRepository {
 
     @Override
     public List<SagaInstance> findTimedOutStartedSagas(Instant now) {
-        return springDataSagaInstanceRepository.findByStatusAndTimeoutAtBefore(SagaStatus.STARTED, now);
+        return springDataSagaInstanceRepository.findTop100ByStatusAndTimeoutAtBeforeOrderByTimeoutAtAsc(
+                SagaStatus.STARTED, now);
     }
 }
