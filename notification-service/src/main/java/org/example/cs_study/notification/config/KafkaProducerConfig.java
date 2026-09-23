@@ -11,7 +11,7 @@ import org.springframework.kafka.core.ProducerFactory;
  * 이 서비스는 순수 컨슈머라(아무 토픽도 발행하지 않음, event-catalog.md) 지금까지
  * {@code KafkaTemplate<String, String>} 빈이 없었다. 2.16의 DLQ 오류 처리기
  * ({@code common-kafka}의 {@code KafkaErrorHandlerConfig})가 재시도를 소진한 메시지를
- * {@code <토픽>.DLT}로 보내려면 프로듀서가 필요해, 도메인 이벤트를 발행하지 않는 서비스도
+ * {@code <토픽>-dlt}로 보내려면 프로듀서가 필요해, 도메인 이벤트를 발행하지 않는 서비스도
  * 이 빈만큼은 갖춰야 한다.
  *
  * <p>Boot가 자동구성하는 {@code KafkaTemplate} 빈은 제네릭이 {@code KafkaTemplate<?, ?>}로
