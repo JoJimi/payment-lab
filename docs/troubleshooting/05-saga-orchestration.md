@@ -407,3 +407,33 @@ DLQ는 `order.created-dlt`다.
 `scripts/replay-dlq.sh`는 로컬 docker-compose Kafka가 있어야 해 이 원격 환경에서는
 실행해보지 못했다 — `kafka-console-consumer.sh`/`kafka-console-producer.sh` 파이프라는
 잘 알려진 패턴을 그대로 썼다.
+
+### 7. 장애 주입 테스트가 실제 버그를 하나 찾아냈다 — `PaymentCompletedListener`에만 없던 상태 가드 (2.17)
+
+**증상**: 2.17("각 서비스를 하나씩 죽인 상태로 주문 → 복구 후 Saga가 이어지거나 보상되는지")
+테스트를 작성하며 "PAYMENT 타임아웃으로 주문이 CANCELLED된 뒤, payment-service가 복구돼
+뒤늦게 `payment.completed`가 도착한다"는 시나리오를 실제 `@EmbeddedKafka`로 재현했더니,
+`PaymentCompletedListener.handle()`이 `order.markPaid()`에서 `InvalidStateTransitionException`
+(`CANCELLED → PAID`는 허용되지 않는 전이)을 던졌다 — 조용한 실패는 아니지만(예외가 나므로),
+문서화된 적 없는 실제 실패 경로였다.
+
+**원인**: 같은 성격의 레이스를 이미 다루는 세 리스너(`InventoryReservedListener`,
+`PaymentFailedListener`, `InventoryFailedListener`, 각각 2.14/2.15에서 추가)는 전부
+"Saga가 이미 `STARTED`를 벗어났으면 조용히 무시"하는 상태 가드를 갖고 있는데,
+`PaymentCompletedListener`만 2.12(정상 흐름 최초 구현) 이후 이 가드가 없었다 — 2.15
+(Saga 타임아웃)가 나중에 추가되면서 "타임아웃이 먼저 끝낸 뒤 뒤늦은 성공 응답이 온다"는
+경로가 새로 생겼는데, 그 경로를 실제로 실행해보는 테스트가 2.17 전까지 없었다.
+
+**해결**: `PaymentCompletedListener.handle()` 맨 앞에서 `SagaInstance`를 먼저 조회해
+`status != STARTED`면 곧장 반환하도록 수정(다른 세 리스너와 같은 패턴). 가드를 통과 못하는
+이벤트는 예외 없이 조용히 버려진다 — 재시도 3회(2.16) 소진 후 `payment.completed-dlt`에
+쌓이던 것과 달리, 이제는 DLT까지 가지 않는다.
+
+**영향 범위**: 이 레이스가 실제로 일어나는 빈도 자체는 낮다(타임아웃 회수와 지연된 PG
+응답이 겹쳐야 한다) — 하지만 일어나면 매번 재시도 예산을 태우고 DLT에 수동 조사 대상을
+쌓는다는 점에서, 2.16(DLQ)이 막으려던 "잡음"에 정확히 해당한다.
+
+**재발 방지**: `FaultInjectionIntegrationTest`(order-service, 2.17)의
+`PAYMENT_서비스가_죽으면_타임아웃으로_보상되고_복구후_뒤늦은_응답은_무시된다()`가 이
+가드를 고정한다 — 가드가 없어지면 이 테스트가 예외로 실패하거나 DLT에 레코드가
+남아 실패한다.
