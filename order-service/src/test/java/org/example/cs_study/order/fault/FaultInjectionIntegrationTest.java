@@ -10,8 +10,8 @@ import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.example.cs_study.common.inbox.ProcessedEventRepository;
 import org.example.cs_study.common.outbox.OutboxEventRepository;
-import org.example.cs_study.common.outbox.OutboxStatus;
 import org.example.cs_study.event.EventEnvelope;
 import org.example.cs_study.event.EventEnvelopeFactory;
 import org.example.cs_study.event.EventType;
@@ -136,6 +136,9 @@ class FaultInjectionIntegrationTest {
     OutboxEventRepository outboxEventRepository;
 
     @Autowired
+    ProcessedEventRepository processedEventRepository;
+
+    @Autowired
     SagaTimeoutScheduler sagaTimeoutScheduler;
 
     @Test
@@ -158,17 +161,17 @@ class FaultInjectionIntegrationTest {
 
         // "payment-service가 복구됐다" — 사실은 PG가 승인했던 결제라, 뒤늦게
         // payment.completed가 도착한다(PAYMENT/UNKNOWN 레이스, 이슈 #72와 같은 계열).
-        publish(
+        String lateEventId = publishAndGetEventId(
                 "payment.completed",
                 order.id().toString(),
                 EventType.PAYMENT_COMPLETED,
                 new PaymentCompletedPayload(order.id(), 999L, "pg-late-tx", new BigDecimal("1000.0000"), "KRW", Instant.now()));
 
-        // 리스너 클래스 Javadoc 참고 — 가드가 조용히 무시하므로 상태가 그대로 유지돼야 한다.
-        // "바뀌지 않았다"를 직접 단언하기 전에, 리스너가 이벤트를 실제로 처리 시도했다는
-        // 증거(DLT로도, processed_event로도 안 남는다는 게 오히려 함정이라 — 대신 일정
-        // 시간 뒤에도 상태가 그대로인지로 확인한다)를 기다린다.
-        sleepBriefly();
+        // 가드는 예외 없이 정상 반환하므로 InboxService의 트랜잭션이 그대로 커밋되고
+        // processed_event에도 기록된다 — "리스너가 이 이벤트를 실제로 처리했다(가드를 타고
+        // 무시했다)"는 양성 증거를 먼저 확인한 뒤에야 상태 불변을 단언한다(CodeRabbit 리뷰:
+        // sleep만으로는 "리스너가 이벤트를 아예 못 받았다"와 구분이 안 된다).
+        awaitEventProcessed(lateEventId);
         assertThat(orderRepository.findById(order.id()).orElseThrow().getStatus()).isEqualTo(OrderStatus.CANCELLED);
         assertThat(sagaInstanceRepository.findById(sagaInstance.getSagaId()).orElseThrow().getStatus())
                 .isEqualTo(SagaStatus.COMPLETED);
@@ -179,9 +182,7 @@ class FaultInjectionIntegrationTest {
                 .isEqualTo(SagaStepStatus.FAILED);
 
         // 가드가 없었다면 예외 → 재시도 3회 소진 → payment.completed-dlt에 쌓였을 것이다.
-        // 가드가 정상 동작하면 애초에 예외가 안 나므로 DLT는 비어 있어야 한다 — 이 자체가
-        // "가드가 실제로 걸렸다"는 양성 증거다(부정 단언만으로는 "아직 처리 중"과 구분이 안
-        // 되므로, sleepBriefly로 재시도 예산(500ms x 3)보다 넉넉히 기다린 뒤 확인한다).
+        // 가드가 정상 동작하면 애초에 예외가 안 나므로 DLT는 비어 있어야 한다.
         assertThat(awaitNoRecordsAfterWaiting("payment.completed-dlt")).isTrue();
     }
 
@@ -221,13 +222,15 @@ class FaultInjectionIntegrationTest {
         // "inventory-service가 복구됐다" — 뒤늦게 inventory.reserved가 도착한다.
         // InventoryReservedListener는 이미 상태 가드를 갖고 있다(2.15, CodeRabbit 리뷰) —
         // 이 테스트는 그 가드가 실제 Kafka 흐름에서도 걸리는지 끝까지 확인한다.
-        publish(
+        String lateEventId = publishAndGetEventId(
                 "inventory.reserved",
                 order.id().toString(),
                 EventType.INVENTORY_RESERVED,
                 new InventoryReservedPayload(order.id(), 41L, 2));
 
-        sleepBriefly();
+        // CodeRabbit 리뷰 — PAYMENT 시나리오와 같은 이유로, sleep 대신 리스너가 이 이벤트를
+        // 실제로 처리했다는 양성 증거(processed_event)를 먼저 확인한다.
+        awaitEventProcessed(lateEventId);
         assertThat(sagaInstanceRepository.findById(sagaInstance.getSagaId()).orElseThrow().getStatus())
                 .isEqualTo(SagaStatus.COMPLETED);
         assertThat(sagaStepRepository
@@ -250,6 +253,14 @@ class FaultInjectionIntegrationTest {
                 order.id().toString(),
                 EventType.PAYMENT_COMPLETED,
                 new PaymentCompletedPayload(order.id(), 1L, "pg-tx", new BigDecimal("3000.0000"), "KRW", Instant.now()));
+
+        // CodeRabbit 리뷰 — 두 토픽의 컨슈머는 처리 순서를 보장하지 않는다. payment.completed
+        // 처리(currentStep→INVENTORY 전이)를 기다리지 않고 inventory.reserved를 바로 보내면,
+        // InventoryReservedListener(currentStep은 안 보고 status만 확인, 2.12)가 먼저 Saga를
+        // COMPLETED로 끝내버릴 수 있다 — 그러면 뒤이어 처리되는 payment.completed는 이미 끝난
+        // Saga로 보여 가드에 걸려 무시되고, order.markPaid()가 안 불려 주문이 PAID가 안 된다.
+        awaitSagaCurrentStep(sagaInstance.getSagaId(), SagaStepName.INVENTORY);
+
         publish(
                 "inventory.reserved",
                 order.id().toString(),
@@ -264,24 +275,16 @@ class FaultInjectionIntegrationTest {
         awaitOrderStatus(order.id(), OrderStatus.PAID);
         awaitSagaStatus(sagaInstance.getSagaId(), SagaStatus.COMPLETED);
 
-        assertThat(outboxEventRepository.findTop100ByStatusOrderByIdAsc(OutboxStatus.PENDING))
+        // CodeRabbit 리뷰 — OutboxRelay가 이 단언보다 먼저 실행되면 이미 PUBLISHED로
+        // 바뀌어 PENDING 조회에서 빠질 수 있다. 상태와 무관하게 이 주문의 행만 걸러 확인한다.
+        assertThat(outboxEventRepository.findAll())
+                .filteredOn(event -> event.getAggregateId().equals(order.id().toString()))
                 .extracting(event -> event.getEventType())
                 .contains("notification.requested");
 
         // notification.requested가 실제로 Kafka에도 나갔는지(발행 자체는 됐는지)만 확인하고,
         // 일부러 소비하지 않는다 — "아무도 안 읽어도 주문 상태에는 영향 없다"가 검증 대상이다.
         assertThat(awaitRecord("notification.requested", order.id())).isNotNull();
-    }
-
-    private void sleepBriefly() {
-        // DLQ 재시도 예산(500ms x 3회, 2.16)보다 넉넉히 기다린다 — 가드가 없었다면 이 안에
-        // 재시도가 전부 소진돼 DLT까지 갔을 시간이다.
-        try {
-            Thread.sleep(2000);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException(e);
-        }
     }
 
     private boolean awaitNoRecordsAfterWaiting(String topic) {
@@ -316,9 +319,27 @@ class FaultInjectionIntegrationTest {
     }
 
     private <T> void publish(String topic, String key, EventType eventType, T payload) {
+        publishAndGetEventId(topic, key, eventType, payload);
+    }
+
+    /** @return 발행한 이벤트의 eventId — 늦은 이벤트가 실제로 처리됐는지 기다릴 때 쓴다. */
+    private <T> String publishAndGetEventId(String topic, String key, EventType eventType, T payload) {
         EventEnvelope<T> envelope = EventEnvelopeFactory.create(eventType, payload);
         String json = objectMapper.writeValueAsString(envelope);
         kafkaTemplate.send(topic, key, json);
+        return envelope.eventId();
+    }
+
+    /**
+     * {@code processed_event}에 이 eventId가 실제로 기록됐는지 기다린다(SagaListenersIntegrationTest의
+     * 같은 이름 헬퍼와 동일한 이유) — 상태 가드가 걸려 조용히 무시하는 경우도 예외 없이 정상
+     * 반환하므로 InboxService의 트랜잭션이 커밋되고 이 테이블에 기록된다. "상태가 안 바뀌었다"만
+     * 보면 "가드가 걸러냈다"와 "리스너가 이 이벤트를 아직/영영 못 받았다"를 구분할 수 없다.
+     */
+    private void awaitEventProcessed(String eventId) {
+        awaitTrue(
+                () -> processedEventRepository.findById(eventId).isPresent(),
+                "eventId=" + eventId + "가 시간 내에 처리되지 않았습니다");
     }
 
     private void awaitOrderStatus(Long orderId, OrderStatus expected) {
@@ -334,6 +355,14 @@ class FaultInjectionIntegrationTest {
                 .map(SagaInstance::getStatus)
                 .filter(expected::equals)
                 .isPresent(), "sagaId=" + sagaId + "의 status가 " + expected + "가 되지 않았습니다");
+    }
+
+    private void awaitSagaCurrentStep(String sagaId, SagaStepName expected) {
+        awaitTrue(() -> sagaInstanceRepository
+                .findById(sagaId)
+                .map(SagaInstance::getCurrentStep)
+                .filter(expected::equals)
+                .isPresent(), "sagaId=" + sagaId + "의 currentStep이 " + expected + "로 전진하지 않았습니다");
     }
 
     private void awaitTrue(java.util.function.BooleanSupplier condition, String failureMessage) {
