@@ -18,6 +18,7 @@ import org.example.cs_study.order.dto.response.OrderResponse;
 import org.example.cs_study.order.repository.OrderRepository;
 import org.example.cs_study.order.repository.SagaInstanceRepository;
 import org.example.cs_study.order.repository.SagaStepRepository;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.ObjectMapper;
@@ -33,26 +34,28 @@ import tools.jackson.databind.ObjectMapper;
 @Service
 public class OrderService {
 
-    /** 2.15에서 실제 타임아웃 스케줄러가 이 값을 근거로 지연된 Saga를 회수한다. 지금은 상수. */
-    private static final Duration SAGA_TIMEOUT = Duration.ofMinutes(10);
-
     private final OrderRepository orderRepository;
     private final SagaInstanceRepository sagaInstanceRepository;
     private final SagaStepRepository sagaStepRepository;
     private final OutboxService outboxService;
     private final ObjectMapper objectMapper;
+    private final Duration sagaTimeout;
 
     public OrderService(
             OrderRepository orderRepository,
             SagaInstanceRepository sagaInstanceRepository,
             SagaStepRepository sagaStepRepository,
             OutboxService outboxService,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper,
+            // 2.15: 테스트가 짧은 타임아웃으로 SagaTimeoutScheduler를 검증할 수 있도록
+            // 설정 가능하게 뺐다 — 실제 운영값은 기본 10분.
+            @Value("${app.saga.timeout-minutes:10}") long sagaTimeoutMinutes) {
         this.orderRepository = orderRepository;
         this.sagaInstanceRepository = sagaInstanceRepository;
         this.sagaStepRepository = sagaStepRepository;
         this.outboxService = outboxService;
         this.objectMapper = objectMapper;
+        this.sagaTimeout = Duration.ofMinutes(sagaTimeoutMinutes);
     }
 
     @Transactional
@@ -62,7 +65,7 @@ public class OrderService {
         Order order = new Order(request.productId(), request.quantity(), totalAmount, request.currency());
         order = orderRepository.save(order);
 
-        SagaInstance sagaInstance = new SagaInstance(order.getId(), Instant.now().plus(SAGA_TIMEOUT));
+        SagaInstance sagaInstance = new SagaInstance(order.getId(), Instant.now().plus(sagaTimeout));
         sagaInstance.advanceTo(SagaStepName.PAYMENT);
         sagaInstance = sagaInstanceRepository.save(sagaInstance);
 

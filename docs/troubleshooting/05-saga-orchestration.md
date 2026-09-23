@@ -219,3 +219,48 @@ PG)가 필요해 이 원격 환경(Docker 없음)에서는 못 돌렸다. 컴파
 두 번 발행하는 테스트를 추가했다 — 둘 다 Docker가 필요해 이 원격 환경에서는 못 돌렸다.
 컴파일과 2.11의 순수 단위 테스트(도메인 상태 전이 규칙 — `@Version` 추가는 전이 규칙 자체를
 바꾸지 않는다) 재실행으로 회귀가 없음을 확인했다.
+
+### 5. Saga 타임아웃 처리 (2.15)
+
+**왜 필요한가 — 실패 이벤트 자체가 안 오는 경우**: 2.13/2.14는 "`payment.failed`/
+`inventory.failed`가 온다"는 것을 전제로 한다. 하지만 다운스트림 서비스가 그 이벤트를 아예
+못 보내는 상황도 있다 — payment-service가 크래시했거나, Mock PG 응답을 기다리다 프로세스가
+죽었거나, Kafka 메시지 자체가 유실되는 등. 이럴 땐 order-service 입장에서 아무 신호도 안
+와서 Saga가 `STARTED`에 영원히 멈춘다. `SagaInstance.timeoutAt`(2.11에서 이미 만들어둔
+컬럼, "이 시각을 넘겨도 STARTED에 머무르면 회수 대상"이라는 Javadoc)이 정확히 이 상황을
+위한 것이었다 — 2.15에서 실제로 회수하는 스케줄러를 붙인다.
+
+**`SagaTimeoutService`가 `PaymentFailedListener`/`InventoryFailedListener`와 로직이
+겹치는데 왜 합치지 않았나**: 셋 다 "스텝을 실패/보상 대상으로 표시 → `beginCompensation()`
+→ `SagaCompensationService.finish()`"라는 뒷부분은 같지만, 앞부분(어떤 스텝을 왜 실패로
+보는지)의 트리거가 다르다 — 리스너는 실제 이벤트 페이로드에서 이유를 읽고, 타임아웃은
+"응답이 안 왔다" 자체가 이유다. `currentStep`을 보고 `PAYMENT`/`INVENTORY` 중 어느 스텝이
+막혀 있었는지 스스로 판단해야 하는 것도 리스너들과 다르다(리스너는 어떤 스텝 얘기인지
+이벤트 토픽 자체가 알려준다). 공통된 뒷부분은 이미 `SagaCompensationService.finish()`로
+뽑혀 있으니 그걸 그대로 재사용했다.
+
+**`NOTIFICATION` 단계에서 타임아웃 회수가 시도되면 조용히 넘기지 않고 예외를 던지는
+이유**: `InventoryReservedListener`가 `notification.requested` 발행과
+`sagaInstance.complete()`를 같은 트랜잭션에서 묶어두므로(2.13), `currentStep`이
+`NOTIFICATION`이면서 `status`가 여전히 `STARTED`인 채로 스케줄러 폴링에 걸릴 창이 이론상
+없다. 여기 걸린다는 건 그 전제(같은 트랜잭션 보장) 자체가 깨졌다는 뜻이라, 방어적으로
+빈 처리를 하기보다 예외로 드러내는 쪽을 택했다 — 잘못 삼키면 진짜 버그를 놓친다.
+
+**타임아웃 값을 상수에서 `@Value` 설정으로 바꾼 이유**: 2.12에서 10분 고정 상수로
+남겨뒀던 이유가 "2.15에서 스케줄러가 이 값을 근거로 회수한다"였다 — 실제로 스케줄러를
+테스트하려면 10분을 기다릴 수 없으니, `app.saga.timeout-minutes`로 빼서 테스트가 0분(즉시
+회수 대상)으로 주입할 수 있게 했다. `OutboxRelay`의 `app.outbox.relay.fixed-delay-ms`
+패턴을 그대로 따랐다.
+
+**스케줄러가 Saga 하나의 회수 실패로 전체가 멈추지 않게 한 이유**: `OutboxRelay`가 발행
+실패를 이벤트별로 삼키고 넘어가는 것과 같은 이유다 — `SagaTimeoutScheduler.
+reclaimTimedOutSagas()`는 `@Transactional`이 아니고, `SagaTimeoutService.reclaim()`을
+Saga별로 개별 호출하면서 예외를 잡아 로깅만 한다. 하나가 실패해도(트랜잭션이 롤백돼
+`timeoutAt`을 여전히 넘긴 채로 남으므로) 다음 폴링에서 다시 시도되고, 나머지 Saga의
+회수를 막지 않는다.
+
+**로컬에서 실제로 검증한 것**: `SagaTimeoutSchedulerTest`(Postgres만, Kafka 불필요 — 스케줄러는
+로컬 DB 상태만 보고 판단한다) 2케이스 — PAYMENT 단계 타임아웃(스텝 자체가 한 번도 응답을
+못 받은 경우), INVENTORY 단계 타임아웃(결제는 성공했는데 재고 응답이 안 온 경우, 리스너
+없이 그 최종 상태를 테스트가 직접 재현). 둘 다 Docker가 필요해 이 원격 환경에서는 못
+돌렸다. 컴파일 전체 모듈 통과와 2.11의 순수 단위 테스트 재실행으로 회귀가 없음을 확인했다.
