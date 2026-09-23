@@ -93,6 +93,16 @@ public class Inventory {
         this.reserved -= quantity;
     }
 
+    /**
+     * {@link #confirm}까지 끝난 예약을 뒤늦게 되돌린다({@code available += n}) —
+     * Saga 타임아웃(2.15)처럼 inventory-service가 스스로는 실패를 모르는 채로 예약을 이미
+     * 확정해버린 뒤에, order-service가 뒤늦게 주문을 취소하는 경우에만 쓴다. confirm에서
+     * 이미 reserved를 빠져나갔으므로 여기서는 손대지 않는다.
+     */
+    public void release(int quantity) {
+        this.available += quantity;
+    }
+
     @PrePersist
     void onCreate() {
         this.updatedAt = Instant.now();

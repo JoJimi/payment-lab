@@ -70,6 +70,12 @@ public class PaymentCompletedListener {
                         "주문 라인아이템을 아직 못 찾았습니다(order.created 미처리 가능성) — 재시도 대상: orderId="
                                 + payload.orderId()));
 
+        if (lineItem.isCancelled()) {
+            // order.cancelled가 이 이벤트보다 먼저 도착했다(OrderLineItem 클래스 Javadoc,
+            // 2.15 CodeRabbit 리뷰) — 지금 예약해봐야 바로 되돌려야 하니 건드리지 않는다.
+            return;
+        }
+
         // 비관적 락(SELECT ... FOR UPDATE) — 같은 상품을 동시에 예약하는 여러 주문이 경합해도
         // 재고 부족 검사와 차감이 원자적으로 이뤄진다. Saga 트리거 경로라 4종 락 전략(1.11) 중
         // 하나를 고정 선택할 이유가 없어(그건 1단계 벤치마크 목적의 스위치다) 가장 단순하고
@@ -82,6 +88,9 @@ public class PaymentCompletedListener {
             inventory.reserve(lineItem.getQuantity());
             inventory.confirm(lineItem.getQuantity());
             inventoryRepository.save(inventory);
+
+            lineItem.markReserved();
+            orderLineItemRepository.save(lineItem);
 
             outboxService.save(
                     EventType.INVENTORY_RESERVED,

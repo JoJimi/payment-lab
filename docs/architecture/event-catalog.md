@@ -219,17 +219,27 @@ CI를 막습니다(`metavariable-type`으로 리시버가 `KafkaTemplate`인 호
 |---|---|---|
 | `payment.failed` | `PaymentService.applyResult()`(2.12부터 이미 발행 중이었음) | `order-service`의 `PaymentFailedListener`(신규) |
 | `inventory.failed` | `inventory-service`의 `PaymentCompletedListener`(2.12부터 이미 발행 중이었음) | `order-service`의 `InventoryFailedListener`(신규) |
-| `order.cancelled` | `order-service`의 `SagaCompensationService.finish()`(신규) | `payment-service`의 `OrderCancelledListener`(신규) |
+| `order.cancelled` | `order-service`의 `SagaCompensationService.finish()`(신규) | `payment-service`의 `OrderCancelledListener`(신규), `inventory-service`의 `OrderCancelledListener`(2.15, 아래 정정 참고) |
 
 **표의 "구독 서비스"와 실제로 다른 점 하나**: 원래 2.6 설계 표는 `order.cancelled`를
-inventory-service와 notification-service도 구독하는 것으로 적어뒀지만, 실제로는
-`payment-service`만 구독합니다.
+inventory-service와 notification-service도 구독하는 것으로 적어뒀지만, 2.13 구현 시점에는
+`payment-service`만 구독했습니다.
 
-1. **inventory-service는 구독하지 않습니다.** 2.12에서 `reserve()`와 `confirm()`을 같은
-   트랜잭션에서 바로 잇달아 호출하도록 설계했고, `reserve()`는 재고 부족을 확인하면
-   `available`/`reserved`를 전혀 건드리지 않고 예외만 던집니다(`Inventory.reserve` 참고).
-   즉 `inventory.failed`가 발행되는 시점에 이 서비스 DB에는 되돌릴 부수효과가 이미 없습니다
-   — 재고를 예약이 성공한 뒤에 실패하는 시나리오 자체가 지금 설계엔 존재하지 않습니다.
+1. **(2.13 당시엔 맞았지만 2.15에서 뒤집힌 판단) inventory-service는 구독하지 않아도 된다고
+   했었습니다.** 근거: 2.12에서 `reserve()`와 `confirm()`을 같은 트랜잭션에서 바로 잇달아
+   호출하도록 설계했고, `reserve()`는 재고 부족을 확인하면 `available`/`reserved`를 전혀
+   건드리지 않고 예외만 던집니다(`Inventory.reserve` 참고) — `inventory.failed`가
+   발행되는 시점엔 이 서비스 DB에 되돌릴 부수효과가 없으니, **`inventory.failed`로 트리거된
+   보상**에 한해서는 여전히 맞습니다. 하지만 2.15(Saga 타임아웃)가 이 전제를 깨뜨리는 경로를
+   하나 더 만들었습니다 — inventory-service가 로컬 커밋(reserve+confirm)은 이미 끝냈는데
+   Transactional Outbox(2.8)의 비동기 발행이 아직 안 끝난 창에서, order-service가
+   "응답이 안 온다"는 이유만으로 타임아웃 처리를 해버리는 경우입니다. 이때는 실제로 되돌릴
+   재고가 있는데 아무도 모르는 채로 남습니다(CodeRabbit 리뷰, PR #71). 그래서 2.15에서
+   `inventory-service`도 `order.cancelled`를 구독하는 `OrderCancelledListener`를
+   추가했습니다 — `inventory.failed`로 트리거된 취소는 여전히 되돌릴 게 없어 사실상
+   no-op이고, 타임아웃으로 트리거된 취소만 실제로 재고를 되돌립니다. 자세한 내용은
+   [troubleshooting/05-saga-orchestration.md](../troubleshooting/05-saga-orchestration.md)의
+   해당 절 참고.
 2. **notification-service는 구독하지 않습니다.** 정상 흐름(`InventoryReservedListener`)과
    대칭으로, order-service가 보상 마무리 시점에 `notification.requested`(type
    `ORDER_CANCELLED`)를 직접 발행합니다 — 알림 채널을 하나로 유지해 notification-service가

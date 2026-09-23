@@ -284,17 +284,39 @@ UNKNOWN을 실제로 해소하는 재조회 시스템이 아니다 — 그건 �
 3.4가 들어오면 `SagaTimeoutService`도 "무작정 실패 처리" 대신 "먼저 실제 상태를 재조회"로
 바뀌어야 한다.
 
-**INVENTORY 타임아웃에서 "커밋된 재고를 복구"할 필요가 없는 이유(CodeRabbit이 같은
-코멘트에서 함께 지적한 부분)**: 위 PAYMENT/UNKNOWN 한계와 달리 이쪽은 실제 결함이
-아니다 — inventory-service는 `reserve()`와 `confirm()`을 같은 로컬 트랜잭션에서 잇달아
-호출한다(2.12) — 이 트랜잭션이 커밋되지 못하면(크래시 등) DB 트랜잭션 원자성 자체가
-재고 변경도 함께 롤백시킨다. 즉 "재고는 실제로 깎였는데 `inventory.reserved` 확인만
-못 받은" 상태 자체가 이 설계에서는 존재할 수 없다(바로 위 "`inventory.failed`가 와도
-inventory-service에 아무것도 요청하지 않는 이유" 항목과 같은 근거). 복구할 대상이
-없으므로 복구 로직도 필요 없다.
+**(정정) INVENTORY 타임아웃에서 "커밋된 재고를 복구"할 필요가 없다고 했던 것은 틀렸다**:
+처음엔 이렇게 판단했었다 — "inventory-service는 `reserve()`와 `confirm()`을 같은 로컬
+트랜잭션에서 잇달아 호출하므로(2.12), 그 트랜잭션이 커밋 안 되면(크래시 등) 재고 변경도
+함께 롤백된다. 즉 '재고는 깎였는데 `inventory.reserved` 확인만 못 받은' 상태는 존재할 수
+없다." 이 추론은 **"로컬 DB 트랜잭션이 원자적이다"와 "그 사실이 다른 서비스에 제때
+전달된다"를 같은 것으로 착각했다** — Transactional Outbox 패턴(2.8)에서는 이 둘이 분리돼
+있다. `reserve()`+`confirm()`+Outbox 행 적재는 분명 한 트랜잭션에서 원자적으로 끝나지만,
+그 Outbox 행을 실제로 Kafka에 발행하는 건 `OutboxRelay`의 **별도 폴링 주기**다 — 로컬
+커밋과 `inventory.reserved` 발행 사이에는 진짜 시간차가 있다. `SagaTimeoutScheduler`는
+그 창을 볼 방법이 없다 — order-service 로컬 상태(응답이 안 왔다는 사실)만 보고 판단하기
+때문에, inventory-service가 이미 재고를 확정해버렸는데도 "응답이 없으니 실패로 간주"하고
+주문을 취소할 수 있다. CodeRabbit이 최초 반박에서 이 착각을 정확히 짚어냈다(PR #71).
+
+**수정**: `OrderLineItem`에 `reserved`/`cancelled` 두 플래그를 추가했다(V5 마이그레이션).
+`PaymentCompletedListener`가 예약+확정에 성공하면 `reserved=true`로 표시하고,
+새로 추가한 inventory-service의 `OrderCancelledListener`가 `order.cancelled`를 받아
+`reserved=true`인 라인아이템만 `Inventory.release()`(신규, `available += n`)로 되돌린다.
+`order.cancelled`와 `payment.completed`는 서로 다른 토픽이라 어느 쪽이 먼저 올지 Kafka가
+보장하지 않으므로, 취소가 예약보다 먼저 도착하는 순서 역전은 `cancelled` 플래그로 막는다
+— `OrderCancelledListener`가 먼저 `cancelled=true`를 남겨두면, 뒤늦게 오는
+`PaymentCompletedListener`가 그 라인아이템을 보고 예약 자체를 건너뛴다(예약했다가 바로
+되돌릴 이유가 없다).
+
+같은 레이스가 order-service 쪽에도 있었다 — 타임아웃이 먼저 Saga를 COMPLETED로 끝내버린
+뒤 뒤늦게 `inventory.reserved`가 도착하면, `InventoryReservedListener`가 이미 끝난 Saga를
+다시 전이시키려다 `SagaStatus.canTransitionTo`에 막혀 예외를 던지고 무한 재시도로
+이어질 수 있었다. 2.14의 상태 가드와 같은 패턴(`status != STARTED`면 조용히 무시)을
+여기도 추가했다.
 
 **로컬에서 실제로 검증한 것**: `SagaTimeoutSchedulerTest`(Postgres만, Kafka 불필요 — 스케줄러는
 로컬 DB 상태만 보고 판단한다) 2케이스 — PAYMENT 단계 타임아웃(스텝 자체가 한 번도 응답을
 못 받은 경우), INVENTORY 단계 타임아웃(결제는 성공했는데 재고 응답이 안 온 경우, 리스너
 없이 그 최종 상태를 테스트가 직접 재현). 둘 다 Docker가 필요해 이 원격 환경에서는 못
-돌렸다. 컴파일 전체 모듈 통과와 2.11의 순수 단위 테스트 재실행으로 회귀가 없음을 확인했다.
+돌렸다. 컴파일 전체 모듈 통과와 2.11의 순수 단위 테스트 재실행으로 회귀가 없음을 확인했다
+— inventory-service의 release 경로 자체에 대한 통합 테스트는 아직 없다(Kafka가 필요해
+이 원격 환경에서 작성/실행이 어렵다는 같은 제약).

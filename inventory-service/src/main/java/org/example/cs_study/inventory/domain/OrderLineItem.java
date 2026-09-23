@@ -39,10 +39,36 @@ public class OrderLineItem {
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 
+    /**
+     * {@code payment.completed} 처리(2.12)가 실제로 재고를 예약/확정했는지 — {@code
+     * order.cancelled}가 뒤늦게 와서 예약을 되돌려야 할 때(2.15 Saga 타임아웃) 이걸 봐야
+     * 한다. 예약 전에 취소가 먼저 오면 여전히 false로 남고, 그러면 되돌릴 것도 없다.
+     */
+    @Column(nullable = false)
+    private boolean reserved = false;
+
+    /**
+     * {@code order.cancelled}를 이미 처리했는지 — {@code order.cancelled}와 {@code
+     * payment.completed}는 서로 다른 토픽이라 어느 쪽이 먼저 올지 Kafka가 보장하지 않는다
+     * (2.15 CodeRabbit 리뷰). 취소가 예약보다 먼저 도착하면 이 플래그로 표시해 두고, 뒤늦게
+     * 오는 예약 시도를 {@link org.example.cs_study.inventory.listener.PaymentCompletedListener}가
+     * 건너뛰게 한다 — 예약했다가 바로 또 되돌릴 필요가 없다.
+     */
+    @Column(nullable = false)
+    private boolean cancelled = false;
+
     public OrderLineItem(Long orderId, Long productId, Integer quantity) {
         this.orderId = orderId;
         this.productId = productId;
         this.quantity = quantity;
+    }
+
+    public void markReserved() {
+        this.reserved = true;
+    }
+
+    public void markCancelled() {
+        this.cancelled = true;
     }
 
     @PrePersist
