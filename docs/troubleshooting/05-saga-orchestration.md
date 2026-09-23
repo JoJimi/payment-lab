@@ -337,3 +337,73 @@ INVENTORY와 다르게 이건 바로 고치지 않았다: 제대로 닫으려면
 돌렸다. 컴파일 전체 모듈 통과와 2.11의 순수 단위 테스트 재실행으로 회귀가 없음을 확인했다
 — inventory-service의 release 경로 자체에 대한 통합 테스트는 아직 없다(Kafka가 필요해
 이 원격 환경에서 작성/실행이 어렵다는 같은 제약).
+
+### 6. DLQ 구성 + 재처리 (2.16)
+
+**문제**: 지금까지 모든 `@KafkaListener`는 예외를 던지면 Spring Kafka 기본 설정에
+기대고 있었다 — 즉시 재시도 9회(간격 0ms) 후 실패하면 그냥 로그만 남기고 조용히
+스킵한다. DLQ가 없으니 실패한 메시지의 흔적이 로그 말고는 안 남고, "재시도를 다 써서
+포기했다"와 "성공했다"를 운영자가 구분할 방법이 없다. 여러 리스너 Javadoc(예:
+`PaymentCompletedListener`)에 이미 "체계적인 지연 재시도/DLQ는 2.16의 몫이다"라고
+적어뒀던 부분이다.
+
+**구성**: 새 모듈 `common-kafka`에 `KafkaErrorHandlerConfig` 하나만 둔다 —
+`DeadLetterPublishingRecoverer` + `DefaultErrorHandler`(500ms 간격, 최초 시도 포함
+총 3회)로 만든 `CommonErrorHandler` 빈이다. 이 타입 빈은 Boot의
+`ConcurrentKafkaListenerContainerFactoryConfigurer`가 기본 리스너 컨테이너 팩토리에
+자동으로 물려주므로, 소비 서비스(order/payment/inventory/notification)는 이 모듈을
+의존성에 추가하기만 하면 되고 기존 `@KafkaListener` 코드는 한 줄도 안 바뀐다.
+
+재시도 간격(500ms, 3회)은 이미 이 코드베이스에 있는 Mock PG 재시도 값
+(payment-service `application.yml`의 `resilience4j.retry.instances.mockPg`)과
+맞췄다 — 순간적인 이벤트 도착 순서 역전(예: `payment.completed`가 `order.created`보다
+먼저 오는 경우, 여러 리스너 Javadoc에 이미 문서화된 레이스)은 보통 이 안에서 풀린다.
+
+**왜 소비 서비스마다 `KafkaTemplate<String, String>` 빈이 있어야 하나**:
+`DeadLetterPublishingRecoverer`가 DLT에 발행하려면 프로듀서가 필요하다. order/payment/
+inventory-service는 이미 common-outbox의 `OutboxKafkaConfig`가 이 빈을 제공하지만,
+notification-service는 순수 컨슈머라(event-catalog.md) 이 빈이 없었다 — 2.16에서
+`notification-service`에도 같은 패턴의 `KafkaProducerConfig`를 추가했다(Boot 자동구성
+`KafkaTemplate`은 와일드카드 제네릭이라 이 필드 타입과 안 맞는 문제는 여기서도 똑같다).
+
+**DLT 토픽 이름에 관한 함정**: 흔히 알려진 접미사는 `.DLT`지만, spring-kafka 4.1.1의
+`DeadLetterPublishingRecoverer` 실제 기본값은 소문자 하이픈 `-dlt`다 —
+`common-kafka`의 `KafkaErrorHandlerConfigTest`를 처음 `.DLT`로 가정하고 짰다가
+"No records found for topic"으로 실패하면서 직접 확인했다(정정 완료). 즉 `order.created`
+DLQ는 `order.created-dlt`다.
+
+**`InboxService`(2.9)와의 관계**: 재시도 도중에는 리스너가 끝까지 성공하지 못했으므로
+`processed_event`에 기록되지 않는다. DLT에서 원본 토픽으로 재발행된 메시지는
+`eventId`가 그대로라 Inbox가 정상적으로 "새 이벤트"로 처리한다 — 재처리 전용 로직이
+따로 필요 없다.
+
+**DLQ 재처리 절차**:
+1. `<토픽>-dlt`에 쌓인 메시지를 확인한다(`docker exec payment-lab-kafka
+   /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092
+   --topic <토픽>-dlt --from-beginning`). 값은 실패한 원본 `EventEnvelope<T>` JSON
+   그대로이므로 원인을 알아내는 데 그대로 쓸 수 있다.
+2. **원인을 먼저 고친다** — 코드 버그면 배포, 일시적 인프라 장애(DB/Redis 다운 등)면
+   해당 인프라를 복구한다. 원인을 안 고치고 재발행하면 같은 재시도(3회)를 또 소진해
+   같은 메시지가 DLT에 또 쌓일 뿐이다.
+3. **원본 토픽을 구독 중인 서비스를 잠깐 멈춘다**(CodeRabbit 리뷰, PR #74) — 재발행 중에
+   컨슈머가 살아있으면 "재발행 → 즉시 재소비 → (원인이 덜 고쳐졌으면) 재실패 → 같은
+   DLT에 또 쌓임"이 `scripts/replay-dlq.sh` 한 번 실행(약 5초) 안에서도 일어날 수 있다.
+   서비스가 꺼져 있으면 재발행은 원본 토픽에 쌓이기만 하고, 서비스를 다시 켰을 때 한
+   번에 정상 소비된다.
+4. `scripts/replay-dlq.sh <토픽>`으로 `<토픽>-dlt`의 메시지를 원본 토픽에 그대로
+   재발행한다. 키/값만 옮기고(예외 정보가 담긴 헤더는 버려짐 — 원본 컨슈머는 그 헤더를
+   보지 않으므로 문제 없다) DLT의 원본 메시지는 지우지 않는다(재발행이 실제로 잘
+   처리됐는지 확인할 때까지 감사 로그로 남겨둔다). 이 스크립트는 키/값을 탭·개행으로
+   구분되는 텍스트로 다룬다 — 이 프로젝트의 실제 페이로드(키=orderId 숫자 문자열,
+   값=한 줄 압축 JSON)는 이 경계에 걸리지 않지만, 일반적인 바이트 그대로 옮기는 도구는
+   아니다(의도적 범위 제한, `scripts/replay-dlq.sh` 상단 주석 참고).
+5. 정상 처리됐는지 확인한 뒤(각 서비스 로그, 또는 도메인 상태) 멈춰뒀던 서비스를 다시
+   켜고, DLT의 원본 메시지를 직접 정리한다(운영에서는 보존 기간 7일이 지나면 자동으로
+   사라진다, event-catalog.md 공통 규칙 표 — 2.16을 위해 일부러 이 기간을 맞춰뒀었다).
+
+**로컬에서 실제로 검증한 것**: `common-kafka`의 `KafkaErrorHandlerConfigTest`
+(임베디드 브로커, Docker 불필요) — 계속 실패하는 리스너가 재시도 3회(약 1초)를 다
+소진하면 원본 레코드가 정확히 `<토픽>-dlt`에 그대로 발행되는 것을 직접 증명한다.
+`scripts/replay-dlq.sh`는 로컬 docker-compose Kafka가 있어야 해 이 원격 환경에서는
+실행해보지 못했다 — `kafka-console-consumer.sh`/`kafka-console-producer.sh` 파이프라는
+잘 알려진 패턴을 그대로 썼다.

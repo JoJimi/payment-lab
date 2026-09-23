@@ -8,6 +8,7 @@ dependencies {
     implementation(project(":common-web"))
     implementation(project(":common-event"))
     implementation(project(":common-inbox"))
+    implementation(project(":common-kafka"))
 
     implementation("org.springframework.boot:spring-boot-starter-webmvc")
     implementation("org.springframework.boot:spring-boot-starter-actuator")

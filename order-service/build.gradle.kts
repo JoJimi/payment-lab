@@ -7,6 +7,7 @@ dependencies {
     implementation(project(":common-event"))
     implementation(project(":common-outbox"))
     implementation(project(":common-inbox"))
+    implementation(project(":common-kafka"))
 
     // ---- Web / 기본 ----
     implementation("org.springframework.boot:spring-boot-starter-webmvc")

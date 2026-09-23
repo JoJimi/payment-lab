@@ -31,10 +31,12 @@ import tools.jackson.databind.ObjectMapper;
  * {@code notification.requested}를 받아 {@link Notification} 행을 남긴다.
  *
  * <p>메시지 발행은 앱 컨텍스트의 {@code KafkaTemplate} 빈을 쓰지 않고 이 테스트가 직접
- * {@link DefaultKafkaProducerFactory}로 만든다 — 이 서비스는 순수 컨슈머라 common-outbox의
- * {@code OutboxKafkaConfig} 같은 concrete-typed {@code KafkaTemplate<String, String>} 빈이
- * 없다(Boot 자동구성 빈은 와일드카드 제네릭이라 이 필드 타입과 안 맞는다, 2.8에서 이미 겪은
- * 문제). 다른 서비스들의 통합 테스트가 raw {@code Consumer}를 직접 만드는 것과 대칭이다.
+ * {@link DefaultKafkaProducerFactory}로 만든다 — (2.16 이전까지는) 이 서비스가 순수
+ * 컨슈머라 concrete-typed {@code KafkaTemplate<String, String>} 빈이 아예 없었기 때문에
+ * 굳어진 패턴이다. 지금은 DLQ 오류 처리기용 {@code KafkaTemplate} 빈이 생겼지만(2.16,
+ * {@code config.KafkaProducerConfig}), 이 테스트는 여전히 도메인 로직과 무관하게 직접
+ * 발행하는 쪽이 명확해 그대로 둔다 — 다른 서비스들의 통합 테스트가 raw {@code Consumer}를
+ * 직접 만드는 것과 대칭이다.
  */
 @Testcontainers
 @EmbeddedKafka(partitions = 1, topics = "notification.requested")
