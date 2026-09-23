@@ -284,6 +284,23 @@ UNKNOWN을 실제로 해소하는 재조회 시스템이 아니다 — 그건 �
 3.4가 들어오면 `SagaTimeoutService`도 "무작정 실패 처리" 대신 "먼저 실제 상태를 재조회"로
 바뀌어야 한다.
 
+**같은 한계의 다른 얼굴 — `cancelForOrder()`의 TOCTOU도 같은 이유로 지금은 닫지 않는다**:
+CodeRabbit이 이어서 지적한 부분이다(PR #71) — `order.cancelled`가 도착했을 때 결제가 아직
+없거나(`payment.requested` 자체가 지연 중) `PENDING`이면 `PaymentService.cancelForOrder()`는
+`APPROVED`인 결제만 취소하므로 조용히 넘어간다. 그 뒤 지연됐던 결제가 뒤늦게 `APPROVED`로
+확정되면 `payment.completed`가 발행되지만, 이미 취소된 주문이라 아무도 그 결제를 취소/환불
+하지 않는다 — INVENTORY 쪽에서 고친 것과 같은 모양의 레이스다.
+
+INVENTORY와 다르게 이건 바로 고치지 않았다: 제대로 닫으려면 결제 서비스에 "이 주문은
+취소됐다"는 의도를 Payment 행의 존재 여부와 무관하게 영속화하고, `requestPaymentFromSaga`/
+`applyResult`(Mock PG 호출이 트랜잭션 밖에 있는 삼단 구조, `PaymentService` Javadoc)가 그
+의도를 확인해 늦게 승인된 결제를 취소하거나 환불해야 한다 — 새 테이블/마이그레이션과
+두 트랜잭션 경계에 걸친 로직이 필요한 별도 작업이다. 게다가 이 마무리 없이 "취소된
+주문이면 무조건 실패 처리"만 얹으면, 실제로는 PG가 승인했을 수도 있는 결제를 재조회 없이
+단정하는 셈이라 위 PAYMENT/UNKNOWN 한계와 똑같은 문제를 새로 만든다 — 결국 제대로 닫으려면
+3.4의 실제 PG 상태 조회가 먼저 필요하다. 그래서 이것도 3.4 범위로 미루고 여기 한계로
+기록한다.
+
 **(정정) INVENTORY 타임아웃에서 "커밋된 재고를 복구"할 필요가 없다고 했던 것은 틀렸다**:
 처음엔 이렇게 판단했었다 — "inventory-service는 `reserve()`와 `confirm()`을 같은 로컬
 트랜잭션에서 잇달아 호출하므로(2.12), 그 트랜잭션이 커밋 안 되면(크래시 등) 재고 변경도
