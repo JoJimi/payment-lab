@@ -46,4 +46,7 @@ dependencies {
     testImplementation("org.testcontainers:testcontainers-postgresql")
     // 2.12: @KafkaListener 통합 테스트(EmbeddedKafka, common-outbox OutboxRelayTest와 같은 패턴).
     testImplementation("org.springframework.kafka:spring-kafka-test")
+    // 2.19: Saga 정본 회귀 스위트(SagaEndToEndIntegrationTest)만 EmbeddedKafka 대신 진짜
+    // Testcontainers Kafka를 쓴다 — 실제 브로커 동작에 더 가까운 검증이 필요해서다.
+    testImplementation("org.testcontainers:testcontainers-kafka")
 }
