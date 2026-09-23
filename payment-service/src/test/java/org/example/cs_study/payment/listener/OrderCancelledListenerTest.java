@@ -151,6 +151,31 @@ class OrderCancelledListenerTest {
         assertThat(stillCancelled.getStatus()).isEqualTo(PaymentStatus.CANCELLED);
     }
 
+    /**
+     * 로드맵 2.18 — 위 2.14 테스트가 다루는 "서로 다른 eventId"(비즈니스 레벨 중복)와 달리,
+     * Kafka at-least-once 재전달로 **같은 eventId**가 그대로 두 번 오는 경우를 검증한다.
+     * {@code InboxService}가 원자적으로 막아야 하는 영역이다.
+     */
+    @Test
+    void order_cancelled가_같은_eventId로_두_번_전달돼도_한_번만_처리된다() {
+        Long orderId = 780L;
+        Payment payment = new Payment(orderId, UUID.randomUUID().toString(), new BigDecimal("1000.0000"), "KRW");
+        payment.approve("tx-cancel-3");
+        payment = paymentRepository.save(payment);
+        Long paymentId = payment.getId();
+
+        OrderCancelledPayload payload = new OrderCancelledPayload(orderId, "OUT_OF_STOCK");
+        EventEnvelope<OrderCancelledPayload> envelope = EventEnvelopeFactory.create(EventType.ORDER_CANCELLED, payload);
+        String json = objectMapper.writeValueAsString(envelope);
+
+        // 완전히 같은 메시지(같은 eventId)를 그대로 두 번 보낸다.
+        kafkaTemplate.send("order.cancelled", orderId.toString(), json);
+        kafkaTemplate.send("order.cancelled", orderId.toString(), json);
+
+        awaitEventProcessed(envelope.eventId());
+        awaitPaymentStatus(paymentId, PaymentStatus.CANCELLED);
+    }
+
     private void publish(Long orderId, String reason) {
         publishAndGetEventId(orderId, reason);
     }

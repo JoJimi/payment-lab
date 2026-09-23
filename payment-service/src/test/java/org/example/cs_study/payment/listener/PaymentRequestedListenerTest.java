@@ -102,6 +102,34 @@ class PaymentRequestedListenerTest {
         awaitApprovedPayment(idempotencyKey);
     }
 
+    /**
+     * 로드맵 2.18 — {@link PaymentRequestedListener}는 이 프로젝트에서 유일하게
+     * {@code InboxService}가 아니라 {@code @Idempotent} AOP로 멱등성을 보장하는 리스너다
+     * (Mock PG 호출을 트랜잭션 밖에 둬야 하는 원칙 때문, 클래스 Javadoc). 다른 9개 리스너와
+     * 메커니즘 자체가 다르므로 별도로 검증한다 — order-service가 같은 {@code idempotencyKey}를
+     * 실은 완전히 같은 메시지(같은 eventId)를 Kafka가 재전달해도 결제가 정확히 한 번만
+     * 생성되는지 확인한다. {@code payments.idempotency_key}엔 DB 유니크 제약도 걸려 있어
+     * (V2 마이그레이션) @Idempotent가 뚫려도 DB가 마지막 방어선이 되지만, 이 테스트가
+     * 실제로 증명하려는 건 정상 경로(AOP 레벨에서 막힘)다.
+     */
+    @Test
+    void payment_requested가_같은_eventId로_두_번_전달돼도_결제는_정확히_한_번만_생성된다() {
+        Long orderId = 556L;
+        String idempotencyKey = UUID.randomUUID().toString();
+        PaymentRequestedPayload payload =
+                new PaymentRequestedPayload(orderId, new BigDecimal("3500.0000"), "KRW", idempotencyKey);
+        String json = objectMapper.writeValueAsString(EventEnvelopeFactory.create(EventType.PAYMENT_REQUESTED, payload));
+
+        long before = paymentRepository.count();
+
+        // Kafka at-least-once 재전달 시뮬레이션 — 완전히 같은 메시지를 그대로 두 번 보낸다.
+        kafkaTemplate.send("payment.requested", orderId.toString(), json);
+        kafkaTemplate.send("payment.requested", orderId.toString(), json);
+
+        awaitApprovedPayment(idempotencyKey);
+        assertThat(paymentRepository.count()).isEqualTo(before + 1);
+    }
+
     private void awaitApprovedPayment(String idempotencyKey) {
         long deadline = System.currentTimeMillis() + Duration.ofSeconds(10).toMillis();
         while (System.currentTimeMillis() < deadline) {
