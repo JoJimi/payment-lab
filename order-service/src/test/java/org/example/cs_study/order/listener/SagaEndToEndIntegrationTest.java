@@ -1,4 +1,4 @@
-package org.example.cs_study.order.saga;
+package org.example.cs_study.order.listener;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -50,6 +50,15 @@ import tools.jackson.databind.ObjectMapper;
  * 중복 처리, DLQ 등)을 검증하는 역할로 계속 남는다. 이 클래스는 "전체가 이어 붙어 도는가"만
  * 본다. 부록 E-3 원칙대로, CI 시간이 늘더라도 이 테스트는 nightly로 빼지 않는다 — Saga
  * 보상 테스트는 이 프로젝트의 존재 이유다.
+ *
+ * <p><b>{@code kafkaTemplate.send()}를 직접 부르는 게 Outbox 우회가 아닌 이유</b>: 이
+ * 클래스가 발행하는 이벤트({@code payment.completed}/{@code payment.failed}/
+ * {@code inventory.reserved}/{@code inventory.failed})는 전부 payment-service/
+ * inventory-service가 "이미 자신의 Outbox를 거쳐 실제로 내보냈을" 이벤트를 이 테스트가 그
+ * 서비스들 대신 흉내내는 것이다({@link SagaListenersIntegrationTest}와 같은 패턴, 2.10
+ * Semgrep 룰도 이 이유로 {@code src/test}를 예외 처리한다). order-service 자신의 발행
+ * 경로({@code orderService.createOrder()} → Outbox)는 이 테스트에서도 그대로 실제 코드를
+ * 탄다 — 건드리지 않는다.
  */
 @Testcontainers
 @SpringBootTest(
