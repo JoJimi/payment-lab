@@ -40,7 +40,7 @@ set -a && source ./.env && set +a
 | 2 | | | | | | |
 | 3 | | | | | | |
 
-마지막 열(`실측 주문 생성률`)은 `benchmarks/raw/saga-run*.json`의 `metrics.iterations.rate`
+마지막 열(`실측 주문 생성률`)은 `benchmarks/raw/saga-run*.json`의 `metrics.iterations.values.rate`
 값을 그대로 옮겨 적을 것 — 아래 "참고"의 부하 동등성 주의사항 때문에 반드시 채워야 한다.
 
 중앙값(지표별):

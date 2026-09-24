@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./_wait-for-app.sh
+source "${SCRIPT_DIR}/_wait-for-app.sh"
+
 # 로드맵 2.20 — 1단계 대비 2단계(서비스 분리 + Kafka Saga) 성능 비교.
 # 시나리오는 k6/saga-order-flow.js (주문 생성 → Saga 완료까지 폴링).
 # 1단계 기준값은 benchmarks/03-baseline.md, 결과는 benchmarks/04-saga-comparison.md에
@@ -35,6 +39,11 @@ mkdir -p benchmarks/raw
 # payment-lab-postgres 컨테이너가 아니다.
 docker exec payment-lab-postgres-inventory psql -U "${DB_USERNAME:?DB_USERNAME이 필요합니다 — .env를 source 하세요}" -d payment_lab_inventory -c \
   "UPDATE inventory SET available = ${STOCK}, reserved = 0 WHERE product_id = ${PRODUCT_ID};"
+
+# CodeRabbit 리뷰(PR #82) — bootRun 직후 바로 워밍업을 쏘면 order-service가 아직 안 떠서
+# 연결 실패가 난다. saga-order-flow.js의 order_success_rate threshold가 rate==1(무관용)로
+# 강화된 뒤로는 이 실패 하나로도 워밍업 자체가 실패 종료해 측정 3회가 아예 안 돈다.
+wait_for_app_ready "${ORDER_SERVICE_URL}/actuator/health"
 
 echo "=== 워밍업 ==="
 k6 run \
