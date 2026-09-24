@@ -28,9 +28,14 @@ public class MockPgClient {
     private final RestClient restClient;
 
     public MockPgClient(@Value("${mockpg.base-url:http://localhost:8090}") String baseUrl) {
+        this(baseUrl, Duration.ofSeconds(5));
+    }
+
+    /** 테스트 전용 — Retry/TimeLimiter 검증에서 5s 기본값 대신 짧은 읽기 타임아웃을 주입한다. */
+    MockPgClient(String baseUrl, Duration readTimeout) {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(Duration.ofSeconds(2));
-        factory.setReadTimeout(Duration.ofSeconds(5));
+        factory.setReadTimeout(readTimeout);
         this.restClient = RestClient.builder().baseUrl(baseUrl).requestFactory(factory).build();
     }
 

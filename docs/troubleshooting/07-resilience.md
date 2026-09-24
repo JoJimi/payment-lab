@@ -90,3 +90,55 @@ FAILED가 아니다, 1단계·부록 A-1)을 CircuitBreaker OPEN 상황까지 �
 3.3(Retry, 지수 백오프+Jitter)과 3.4(TimeLimiter, 지금은 `MockPgClient`의 고정 5초
 읽기 타임아웃뿐)에서 `ResilientMockPgGateway`의 안쪽(TimeLimiter)과 바깥쪽(Retry)에
 이어붙인다.
+
+### 3. Retry 배선 — 지수 백오프 + Jitter, 그리고 왜 재시도가 안전한가 (3.3)
+
+**배경**: 3.1이 결정한 순서대로 Retry를 CircuitBreaker 바깥에 씌워야 한다. 그런데 재시도를
+덧붙이기 전에 먼저 답해야 할 질문이 있다 — 결제 요청을 재시도해도 정말 안전한가? 재시도
+때문에 같은 결제가 두 번 승인되면 안 된다.
+
+**재시도가 안전한 이유**: `ResilientMockPgGateway.requestPayment(idempotencyKey, ...)`는
+`idempotencyKey`를 파라미터로 받아 CircuitBreaker/Retry로 감싸는 람다 안에서 그대로
+재사용한다 — Retry가 몇 번을 재시도하든 매 시도가 정확히 같은 키로 `MockPgClient`를
+호출한다. `MockPgServer`(1.6)는 같은 `idempotencyKey`를 최초 1회만 실제로 처리하고, 이미
+처리 중이거나 끝난 키로 다시 들어온 요청은 그 결과가 나올 때까지 기다렸다가 동일한 응답을
+재현한다(`idempotencyCache.computeIfAbsent`). 즉 재시도 안전성은 Retry 설정이 아니라
+"재시도 전체에서 같은 키를 재사용한다"는 호출부의 구조 자체가 보장한다 — 새 코드를 추가로
+짤 필요가 없었고, 대신 이 사실을 테스트로 증명해 회귀를 잡아냈다(아래 실험 3).
+
+**결정**: `RetryConfig`에 `retry-exceptions: [MockPgUnavailableException]`만 지정한다 —
+카드 거절 등 정상 비즈니스 실패는 애초에 예외를 던지지 않으니 재시도 대상이 아니고(3.2),
+서킷이 이미 열려 원본 호출조차 못 간 `CallNotPermittedException`도 재시도 목록에서 뺀다.
+이미 열렸다고 확인된 서킷을 다시 두드려봐야 또 즉시 거부될 뿐인데, 빼지 않으면 남은
+재시도 예산(대기시간 포함)을 낭비한다 — 3.1 실험 2와 같은 이유다. 대기시간은 지수
+백오프(500ms → 1000ms, `exponential-backoff-multiplier: 2`)에 ±50% 무작위 지터
+(`randomized-wait-factor: 0.5`)를 얹었다 — 여러 인스턴스가 동시에 PG 장애를 겪을 때
+재시도가 한 타이밍에 몰려 막 회복 중인 PG에 다시 부하를 몰아주는 걸(thundering herd) 막기
+위해서다.
+
+**실험 1 — 지속적 PG 불능이면 지수 백오프로 재시도하다 결국 UNKNOWN으로 포기한다**:
+`forceTimeout=true`로 PG를 계속 불능 상태로 만들고 클라이언트 읽기 타임아웃을 100ms로
+짧게 준 뒤(`maxAttempts=3`, 초기 대기 200ms, 배율 2) 서킷은 절대 열리지 않을 만큼 임계치를
+넉넉히 잡아 순수하게 Retry만 관찰했다. 시도 3회(각 ~100ms) + 백오프 2회(200ms, 400ms)로
+총 소요시간이 700ms 이상 걸린다는 사실로 지수 백오프가 실제로 두 번 적용됐음을 증명했다
+(고정 대기였다면 훨씬 짧거나 훨씬 길게 나왔을 것).
+
+**실험 2 — 재시도 도중 서킷이 열리면 남은 재시도는 즉시 실패로 끝나 백오프를 낭비하지
+않는다**: `maxAttempts=5`로 여유를 주고 슬라이딩 윈도우 크기 2로 서킷이 2번 만에 열리게
+설정했다. 실제 흐름은 시도1(실패, 1/2) → 백오프 150ms → 시도2(실패, 2/2, 서킷 OPEN) →
+백오프 300ms → 시도3은 `CallNotPermittedException`으로 즉시 끝난다(원본 호출 없음,
+`retry-exceptions`에 없어 재시도도 안 함) — 합쳐서 1.5초 미만. 만약
+`CallNotPermittedException`도 재시도 대상이었다면 남은 두 번의 백오프(600ms, 1200ms)가
+더 붙어 2.4초를 넘겼을 것이다.
+
+**실험 3 — 같은 idempotencyKey로 재시도해도 PG는 한 번만 처리하고 같은 결과를 재현한다**:
+PG 응답 지연을 300ms로, 클라이언트 읽기 타임아웃을 100ms로 설정했다. 첫 시도는 반드시
+클라이언트 타임아웃으로 실패하지만 서버 쪽 처리는 취소되지 않고 계속 진행된다 — 백오프
+(250ms) 뒤의 두 번째 시도가 도착할 시점(300ms 경과 후)엔 이미 완료된 결과를 즉시
+재현받아 APPROVED로 끝난다. 만약 재시도마다 `idempotencyKey`를 새로 생성하는 버그가
+있었다면 매 시도가 처음부터 300ms 지연을 다시 겪어 3번 다 타임아웃으로 소진되고
+TIMEOUT이 됐을 것이다 — 여기서 APPROVED가 나온다는 사실 자체가 재시도 전체에서 같은
+키를 재사용한다는 증거이자, 이 성질이 깨지면 실패하는 회귀 테스트다.
+
+**아직 손대지 않은 것**: TimeLimiter는 여전히 감지 않았다 — `MockPgClient`의 고정 5초
+읽기 타임아웃을 실제 Resilience4j `TimeLimiter`로 교체하는 것은 3.4에서 이어간다.
