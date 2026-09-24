@@ -8,8 +8,8 @@ import org.example.cs_study.common.outbox.OutboxService;
 import org.example.cs_study.event.EventType;
 import org.example.cs_study.event.payload.PaymentCompletedPayload;
 import org.example.cs_study.event.payload.PaymentFailedPayload;
-import org.example.cs_study.payment.client.MockPgClient;
 import org.example.cs_study.payment.client.MockPgResult;
+import org.example.cs_study.payment.client.ResilientMockPgGateway;
 import org.example.cs_study.payment.domain.Payment;
 import org.example.cs_study.payment.domain.PaymentStatus;
 import org.example.cs_study.payment.dto.request.RequestPaymentRequest;
@@ -26,7 +26,7 @@ public class PaymentService {
 
     private final PaymentRepository paymentRepository;
     private final OrderValidator orderValidator;
-    private final MockPgClient mockPgClient;
+    private final ResilientMockPgGateway mockPgGateway;
     private final MeterRegistry meterRegistry;
     private final TransactionTemplate transactionTemplate;
     private final OutboxService outboxService;
@@ -34,13 +34,13 @@ public class PaymentService {
     public PaymentService(
             PaymentRepository paymentRepository,
             OrderValidator orderValidator,
-            MockPgClient mockPgClient,
+            ResilientMockPgGateway mockPgGateway,
             MeterRegistry meterRegistry,
             PlatformTransactionManager transactionManager,
             OutboxService outboxService) {
         this.paymentRepository = paymentRepository;
         this.orderValidator = orderValidator;
-        this.mockPgClient = mockPgClient;
+        this.mockPgGateway = mockPgGateway;
         this.meterRegistry = meterRegistry;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.outboxService = outboxService;
@@ -95,7 +95,7 @@ public class PaymentService {
 
     private PaymentResponse doRequestPayment(String idempotencyKey, RequestPaymentRequest request) {
         Long paymentId = savePending(idempotencyKey, request);
-        MockPgResult result = mockPgClient.requestPayment(idempotencyKey, request.amount(), request.currency());
+        MockPgResult result = mockPgGateway.requestPayment(idempotencyKey, request.amount(), request.currency());
         return applyResult(paymentId, result);
     }
 

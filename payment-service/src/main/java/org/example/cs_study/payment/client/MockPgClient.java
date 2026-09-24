@@ -13,7 +13,14 @@ import org.springframework.web.client.RestClient;
  *
  * <p>읽기 타임아웃은 1단계 임시값(5s)이다. 3단계에서 Resilience4j
  * {@code TimeLimiter}(3.4)로 교체하고, 데코레이터 적용 순서(3.1)에 맞춰 재구성할 예정.
- * 지금은 타임아웃이 나면 {@link MockPgResult#timedOut()}으로 변환해 UNKNOWN 상태로 이어지게만 한다.
+ *
+ * <p><b>3.2:</b> PG가 승인/거절을 확정하지 못하는 상황(5xx, 타임아웃, 파싱 불가)은
+ * {@link MockPgResult#timedOut()}을 반환하는 대신 {@link MockPgUnavailableException}을
+ * 던진다 — {@link ResilientMockPgGateway}의 CircuitBreaker가 "기술적 실패"만 골라
+ * 반응하려면 정상 반환(승인/거절)과 구분되는 예외가 필요하다. 이 클래스를 직접 호출하는
+ * 코드는 없어야 한다({@link ResilientMockPgGateway}를 통해서만 호출) — 2.10 Semgrep 룰이
+ * {@code KafkaTemplate} 직접 호출을 막는 것과 같은 이유로, 향후 필요하면 이 경로도
+ * 기계적으로 강제할 수 있다.
  */
 @Component
 public class MockPgClient {
@@ -39,11 +46,11 @@ public class MockPgClient {
                         // 없으므로, 억지로 body를 읽으면 body.status()가 null이 되어 FAILED로 잘못
                         // 확정되거나(경로 지침 위반) null 자체에서 NPE가 난다.
                         if (res.getStatusCode().is5xxServerError()) {
-                            return MockPgResult.timedOut();
+                            throw new MockPgUnavailableException("Mock PG 5xx 응답: " + res.getStatusCode());
                         }
                         MockPgResponseBody body = res.bodyTo(MockPgResponseBody.class);
                         if (body == null || body.status() == null) {
-                            return MockPgResult.timedOut();
+                            throw new MockPgUnavailableException("Mock PG 응답을 파싱할 수 없습니다");
                         }
                         return "APPROVED".equals(body.status())
                                 ? MockPgResult.approved(body.transactionId())
@@ -51,7 +58,7 @@ public class MockPgClient {
                     });
         } catch (ResourceAccessException e) {
             // 커넥션/읽기 타임아웃 — PG가 실제로 승인했는지 알 수 없다.
-            return MockPgResult.timedOut();
+            throw new MockPgUnavailableException("Mock PG 커넥션/읽기 타임아웃", e);
         }
     }
 
