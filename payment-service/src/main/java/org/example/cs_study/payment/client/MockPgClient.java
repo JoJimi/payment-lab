@@ -2,7 +2,6 @@ package org.example.cs_study.payment.client;
 
 import java.math.BigDecimal;
 import java.time.Duration;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
@@ -12,8 +11,13 @@ import org.springframework.web.client.RestClient;
 /**
  * {@code org.example.cs_study.mockpg.MockPgServer}(별도 프로세스, 1.5)를 호출하는 클라이언트.
  *
- * <p>읽기 타임아웃은 1단계 임시값(5s)이다. 3단계에서 Resilience4j
- * {@code TimeLimiter}(3.4)로 교체하고, 데코레이터 적용 순서(3.1)에 맞춰 재구성할 예정.
+ * <p><b>3.4:</b> 읽기 타임아웃은 더 이상 이 클래스가 독자적으로 정하는 값이 아니다 —
+ * {@code resilience4j.timelimiter.instances.mockPg.timeout-duration}과 같은 값을 공유해서
+ * 쓴다(1단계 임시값 5초를 대체). {@link ResilientMockPgGateway}의 {@code TimeLimiter}가 이
+ * 시간이 지나면 논리적으로 포기하고 {@code Future}를 취소하는데, 이 클래스가 쓰는 blocking
+ * HTTP 클라이언트는 인터럽트에 응답하지 않아 실제 소켓은 더 오래 붙들려 있을 수 있다 — 그
+ * "더 오래"의 상한을 TimeLimiter의 논리적 타임아웃과 맞춰, 최소한 둘이 크게 어긋나지 않게
+ * 한다. 스레드가 실제로 격리되지 않은 채 남아있는 문제 자체는 3.5(Bulkhead)의 몫이다.
  *
  * <p><b>3.2:</b> PG가 승인/거절을 확정하지 못하는 상황(5xx, 타임아웃, 파싱 불가)은
  * {@link MockPgResult#timedOut()}을 반환하는 대신 {@link MockPgUnavailableException}을
@@ -28,15 +32,13 @@ public class MockPgClient {
 
     private final RestClient restClient;
 
-    // 생성자가 둘이라 Spring이 어느 쪽으로 주입할지 스스로 못 고른다 — @Autowired로 명시하지
-    // 않으면 "No default constructor found"로 빈 생성 자체가 실패한다(CI에서 실제로 겪음).
-    @Autowired
-    public MockPgClient(@Value("${mockpg.base-url:http://localhost:8090}") String baseUrl) {
-        this(baseUrl, Duration.ofSeconds(5));
-    }
-
-    /** 테스트 전용 — Retry/TimeLimiter 검증에서 5s 기본값 대신 짧은 읽기 타임아웃을 주입한다. */
-    MockPgClient(String baseUrl, Duration readTimeout) {
+    // 테스트(Retry/CircuitBreaker/TimeLimiter 검증)는 이 생성자를 직접 호출해 readTimeout을
+    // 짧게 준다 — 운영에서는 Spring이 두 @Value를 읽어 호출한다. 생성자가 하나뿐이라 Spring의
+    // 생성자 선택 모호성 문제(CI에서 실제로 겪음, 이전 버전에서 생성자가 둘이었을 때)는
+    // 애초에 없다.
+    public MockPgClient(
+            @Value("${mockpg.base-url:http://localhost:8090}") String baseUrl,
+            @Value("${resilience4j.timelimiter.instances.mockPg.timeout-duration:3s}") Duration readTimeout) {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(Duration.ofSeconds(2));
         factory.setReadTimeout(readTimeout);

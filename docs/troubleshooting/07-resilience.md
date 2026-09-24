@@ -161,3 +161,51 @@ TIMEOUT이 됐을 것이다 — 여기서 APPROVED가 나온다는 사실 자체
 
 **아직 손대지 않은 것**: TimeLimiter는 여전히 감지 않았다 — `MockPgClient`의 고정 5초
 읽기 타임아웃을 실제 Resilience4j `TimeLimiter`로 교체하는 것은 3.4에서 이어간다.
+
+### 4. TimeLimiter 배선 — 고정 5초 타임아웃을 대체하고, blocking 클라이언트의 한계를 받아들인다 (3.4)
+
+**배경**: 3.1이 정한 순서(Retry 바깥 → CircuitBreaker → TimeLimiter 안쪽)의 마지막 조각이다.
+지금까지 "시간 제한"은 `MockPgClient`가 `SimpleClientHttpRequestFactory`에 하드코딩한
+5초 읽기 타임아웃뿐이었다 — Resilience4j `TimeLimiter`가 관여하지 않았고, 그래서 3.1
+실험 3이 증명한 "매 재시도가 독립적인 시간 예산을 받는다"는 성질도 실제 운영 경로에는
+아직 적용돼 있지 않았다.
+
+**문제 — 동기(blocking) 클라이언트를 `TimeLimiter`에 어떻게 물리는가**: `TimeLimiter`의
+API(`decorateFutureSupplier`)는 `Future`를 요구하는데, `MockPgClient.requestPayment`는
+동기 호출이라 `Future`가 없다. 별도 스레드에 위임해야 `Future`를 만들 수 있다 —
+`ResilientMockPgGateway`가 소유한 `ExecutorService`(`executor.submit(() ->
+mockPgClient.requestPayment(...))`)가 그 역할을 한다.
+
+**결정**: `TimeLimiter.decorateFutureSupplier(timeLimiter, () -> executor.submit(...))`로
+얻은 `Callable`을 `CircuitBreaker.decorateCallable`로, 다시 `Retry.decorateCallable`로
+감싼다 — 3.1이 정한 순서 그대로다. `TimeLimiter`가 던지는 `TimeoutException`은
+`MockPgUnavailableException`과 동일하게 취급한다 — "시간 안에 응답 못 받음"도 "승인/거절을
+확정할 수 없다"는 뜻이라 재시도 대상이고(서킷 상태 확인 포함, 3.3), 최종적으로도
+`MockPgResult.timedOut()`(UNKNOWN)으로 번역된다. `MockPgClient`의 읽기 타임아웃은 더 이상
+독자적인 5초 고정값이 아니라 `resilience4j.timelimiter.instances.mockPg.timeout-duration`
+(현재 3초)과 같은 값을 `@Value`로 공유해서 쓴다.
+
+**한계 — `cancelRunningFuture`가 실제 소켓을 끊지는 못한다**: `TimeLimiter`는 시간이
+지나면 기본적으로 `future.cancel(true)`를 호출해 실행 중인 `Future`에 인터럽트를 보낸다.
+그런데 `MockPgClient`가 쓰는 `SimpleClientHttpRequestFactory`(내부적으로
+`HttpURLConnection`)는 blocking I/O라 `Thread.interrupt()`에 반응하지 않는다 — 인터럽트
+플래그만 세워질 뿐, 소켓 읽기는 계속 블로킹된 채로 남는다. 즉 `TimeLimiter`가 "논리적으로"
+포기하고 호출자에게 `TimeoutException`을 던진 뒤에도, 그 요청을 처리하던 백그라운드
+스레드는 `MockPgClient`의 자체 읽기 타임아웃이 실제로 터질 때까지 계속 점유된 채
+남아있을 수 있다. 이걸 근본적으로 막으려면(전용 스레드풀 크기 제한 + 거부 정책) 3.5
+(Bulkhead)가 필요하다 — 3.4는 그 차이를 최소화하는 선에서 그친다: `MockPgClient`의 읽기
+타임아웃을 `TimeLimiter`의 `timeout-duration`과 같은 값으로 맞춰, 논리적 타임아웃과
+"실제로 스레드가 붙들려 있는" 상한이 크게 벌어지지 않게 했다. 스레드가 격리되지 않은 채
+남는 문제 자체는 여전히 해결되지 않았다는 걸 분명히 해둔다.
+
+**증명 — PG가 응답은 하지만 느리면 TimeLimiter가 클라이언트 타임아웃보다 먼저 끊는다**:
+`MockPgServer`의 응답 지연을 1000ms로, `TimeLimiterConfig`의 `timeoutDuration`을 200ms로
+짧게 준 뒤(클라이언트 읽기 타임아웃은 5초로 넉넉히 둬서 간섭하지 않게 함) 호출했다.
+결과는 `TIMEOUT`(UNKNOWN)이고 실제 경과 시간은 1000ms보다 훨씬 짧다(측정값 약 211ms) —
+클라이언트의 5초 소켓 타임아웃이 아니라 `TimeLimiter`의 200ms가 먼저 끊었다는 뜻이다.
+`ResilientMockPgGatewayTest`의 기존 6개 테스트는 전부 10초짜리 넉넉한 `TimeLimiterConfig`
+기본값을 쓰도록 해서, 3.3까지 검증했던 Retry/CircuitBreaker 동작이 새 TimeLimiter 계층
+때문에 흔들리지 않았음을 함께 확인했다(7/7 통과).
+
+**아직 손대지 않은 것**: PG 호출 전용 스레드풀의 크기 제한과 거부 정책, 그리고 그
+스레드풀이 다른 작업과 자원을 다투지 않도록 격리하는 것은 3.5(Bulkhead)에서 이어간다.

@@ -7,6 +7,8 @@ import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.github.resilience4j.core.IntervalFunction;
 import io.github.resilience4j.retry.RetryConfig;
 import io.github.resilience4j.retry.RetryRegistry;
+import io.github.resilience4j.timelimiter.TimeLimiterConfig;
+import io.github.resilience4j.timelimiter.TimeLimiterRegistry;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.time.Duration;
@@ -17,17 +19,21 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 /**
- * 3.2/3.3 — {@link ResilientMockPgGateway}가 Retry+CircuitBreaker를 3.1이 결정한 순서
- * (Retry 바깥 → CircuitBreaker 안쪽)로 실제로 올바르게 감싸는지 증명한다. Spring 컨텍스트도
- * Docker도 필요 없다 — {@link MockPgServer}를 인프로세스로 띄우고(1.5,
- * {@code PaymentIdempotencyConcurrencyTest}와 같은 패턴), 순수 Resilience4j core API로
- * CircuitBreaker/Retry를 직접 구성한다.
+ * 3.2/3.3/3.4 — {@link ResilientMockPgGateway}가 Retry+CircuitBreaker+TimeLimiter를 3.1이
+ * 결정한 순서(Retry 바깥 → CircuitBreaker → TimeLimiter 안쪽)로 실제로 올바르게 감싸는지
+ * 증명한다. Spring 컨텍스트도 Docker도 필요 없다 — {@link MockPgServer}를 인프로세스로
+ * 띄우고(1.5, {@code PaymentIdempotencyConcurrencyTest}와 같은 패턴), 순수 Resilience4j
+ * core API로 CircuitBreaker/Retry/TimeLimiter를 직접 구성한다.
  */
 class ResilientMockPgGatewayTest {
 
     /** CircuitBreaker 동작만 보는 테스트에서 Retry 변수를 없애기 위한 사실상 무재시도 설정. */
     private static final RetryConfig NO_RETRY =
             RetryConfig.custom().maxAttempts(1).build();
+
+    /** TimeLimiter 자체를 검증하는 테스트가 아니면 절대 먼저 끊기지 않을 만큼 넉넉한 제한. */
+    private static final TimeLimiterConfig GENEROUS_TIME_LIMIT =
+            TimeLimiterConfig.custom().timeoutDuration(Duration.ofSeconds(10)).build();
 
     private static MockPgServer mockPgServer;
     private static String baseUrl;
@@ -53,10 +59,16 @@ class ResilientMockPgGatewayTest {
     }
 
     private ResilientMockPgGateway newGateway(CircuitBreakerConfig cbConfig, RetryConfig retryConfig, Duration readTimeout) {
+        return newGateway(cbConfig, retryConfig, readTimeout, GENEROUS_TIME_LIMIT);
+    }
+
+    private ResilientMockPgGateway newGateway(
+            CircuitBreakerConfig cbConfig, RetryConfig retryConfig, Duration readTimeout, TimeLimiterConfig tlConfig) {
         MockPgClient client = new MockPgClient(baseUrl, readTimeout);
         CircuitBreakerRegistry cbRegistry = CircuitBreakerRegistry.of(cbConfig);
         RetryRegistry retryRegistry = RetryRegistry.of(retryConfig);
-        return new ResilientMockPgGateway(client, cbRegistry, retryRegistry);
+        TimeLimiterRegistry tlRegistry = TimeLimiterRegistry.of(tlConfig);
+        return new ResilientMockPgGateway(client, cbRegistry, retryRegistry, tlRegistry);
     }
 
     @Test
@@ -217,6 +229,36 @@ class ResilientMockPgGatewayTest {
                 gateway.requestPayment(UUID.randomUUID().toString(), new BigDecimal("1000.0000"), "KRW");
 
         assertThat(result.outcome()).isEqualTo(MockPgOutcome.APPROVED);
+    }
+
+    @Test
+    void PG가_응답은_하지만_느리면_TimeLimiter가_클라이언트_타임아웃보다_먼저_끊는다() throws IOException {
+        // delayMs=1000: PG는 정상적으로 응답하지만 1초가 걸린다(장애가 아니라 그냥 느림) —
+        // forceTimeout이 아니므로 클라이언트 읽기 타임아웃(5초, 넉넉히 큼)은 이 테스트에서
+        // 절대 먼저 끊지 않는다. TimeLimiter만 짧게(200ms) 잡아, 실제로 끊는 주체가
+        // MockPgClient의 소켓 타임아웃이 아니라 TimeLimiter라는 걸 증명한다.
+        configureMockPg(1000, 0.0, null, false);
+        TimeLimiterConfig shortTimeLimit =
+                TimeLimiterConfig.custom().timeoutDuration(Duration.ofMillis(200)).build();
+        CircuitBreakerConfig cbConfig = CircuitBreakerConfig.custom()
+                .slidingWindowSize(10)
+                .minimumNumberOfCalls(10)
+                .failureRateThreshold(50)
+                .waitDurationInOpenState(Duration.ofSeconds(30))
+                .build();
+        ResilientMockPgGateway gateway =
+                newGateway(cbConfig, NO_RETRY, Duration.ofSeconds(5), shortTimeLimit);
+
+        long start = System.nanoTime();
+        MockPgResult result =
+                gateway.requestPayment(UUID.randomUUID().toString(), new BigDecimal("1000.0000"), "KRW");
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+
+        assertThat(result.outcome()).isEqualTo(MockPgOutcome.TIMEOUT);
+        // TimeLimiter가 끊었다면 200ms 근처(넉넉히 잡아도 1초 미만)에 돌아온다. 만약
+        // TimeLimiter가 배선되지 않아 클라이언트의 5초 소켓 타임아웃이나 PG의 1초 처리
+        // 완료를 기다렸다면 1000ms를 훌쩍 넘겼을 것이다.
+        assertThat(elapsedMs).isLessThan(1000L);
     }
 
     private static CircuitBreakerConfig defaultConfig() {
