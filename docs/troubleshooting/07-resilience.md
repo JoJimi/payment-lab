@@ -49,3 +49,47 @@ TimeLimiter의 `timeoutDuration`이라는 독립적으로 튜닝하고 싶은 �
 각 데코레이터의 파라미터를 실제 운영값으로 튜닝하는 것, Fallback 설계는 3.2~3.6에서
 하나씩 이어간다 — 2.11(테이블+상태 전이)이 2.12(실제 배선)와 태스크를 분리했던 것과
 같은 패턴이다.
+
+### 2. CircuitBreaker 실제 배선 (3.2) — "정상 실패"와 "PG 불능"을 구분해야 서킷이 의미 있다
+
+**배경**: 3.1이 결정한 순서(Retry → CircuitBreaker → TimeLimiter) 중 CircuitBreaker를
+`PaymentService`가 실제로 호출하는 경로에 배선한다. `MockPgClient.requestPayment`를
+그대로 `CircuitBreaker.decorateSupplier`로 감싸려다 보니, 이 클라이언트가 지금까지
+결과를 **전부 정상 반환값**(`MockPgResult`)으로 전달하고 있다는 문제와 마주쳤다 — 카드
+거절(`FAILED`)도, PG가 아예 응답을 못 준 상황(5xx/타임아웃, 지금까지는
+`MockPgResult.timedOut()`)도 둘 다 예외 없이 정상 리턴이었다.
+
+**문제**: CircuitBreaker는 예외가 나야만 실패로 기록한다. 카드 거절은 PG가 정상적으로
+"이 결제는 안 된다"고 답한 것이지 인프라 장애가 아니다 — 카드 거절이 많다고 서킷이
+열리면(예: 프로모션 기간에 한도 초과 결제 시도가 몰릴 때) 정상적으로 응답하고 있는
+PG를 향한 트래픽을 스스로 차단하는 자해가 된다. 반대로 PG가 응답을 못 주는 상황
+(5xx, 커넥션/읽기 타임아웃, 파싱 불가)은 `MockPgResult.timedOut()`이라는 "정상 반환값"
+뒤에 숨어 있어서 CircuitBreaker가 절대 감지하지 못한다.
+
+**결정**: `MockPgClient`가 "PG 불능" 상황에서는 `MockPgUnavailableException`을 던지도록
+바꿨다 — 카드 거절/승인은 여전히 정상 반환(`MockPgResult.approved`/`failed`), PG 자체가
+응답을 못 준 경우만 예외로 승격한다. `PaymentService`와 `MockPgClient` 사이에
+`ResilientMockPgGateway`를 새로 끼워 CircuitBreaker를 소유하게 했다 — 이 게이트웨이가
+`MockPgUnavailableException`(원본 호출 실패)과 `CallNotPermittedException`(서킷이 이미
+열려 원본 호출조차 안 감)을 둘 다 잡아 `MockPgResult.timedOut()`으로 다시 번역해
+돌려준다. `PaymentService` 입장에서는 인터페이스가 바뀌지 않는다 — 여전히
+`MockPgResult`만 받는다.
+
+**서킷 OPEN을 왜 FAILED가 아니라 UNKNOWN으로 번역하는가**: 서킷이 열려 원본 호출조차
+시도하지 않았다는 것은 "PG가 거절했다"는 증거가 전혀 없다는 뜻이다 — 결제가 실제로는
+승인됐을 수도 있는데 FAILED로 단정하면 order-service가 보상(재고 해제, 주문 취소)을
+잘못 개시한다. `PaymentService.applyResult`가 이미 지키던 원칙(TIMEOUT은 UNKNOWN이지
+FAILED가 아니다, 1단계·부록 A-1)을 CircuitBreaker OPEN 상황까지 그대로 확장한 것이다.
+
+**증명**: `ResilientMockPgGatewayTest`(Spring 컨텍스트 불필요, `MockPgServer`를
+인프로세스로 띄우고 CircuitBreaker는 core API로 직접 구성)로 세 가지를 확인했다 — ①
+정상 응답은 그대로 전달됨, ② `failureRate=1.0`(매번 정상적으로 카드 거절)으로 5번
+반복해도 서킷은 CLOSED를 유지함(예외가 없으니 CircuitBreaker가 볼 게 없다), ③
+`forceTimeout=true`로 PG 불능을 반복하면 슬라이딩 윈도우가 채워지는 즉시 서킷이 열리고,
+그 뒤로는 원본 호출(5초 읽기 타임아웃)까지 가지 않고 500ms 안에 `TIMEOUT`을 즉시
+반환한다.
+
+**여전히 남은 것**: Retry와 TimeLimiter는 아직 감지 않았다 — 3.1이 정한 순서대로
+3.3(Retry, 지수 백오프+Jitter)과 3.4(TimeLimiter, 지금은 `MockPgClient`의 고정 5초
+읽기 타임아웃뿐)에서 `ResilientMockPgGateway`의 안쪽(TimeLimiter)과 바깥쪽(Retry)에
+이어붙인다.
