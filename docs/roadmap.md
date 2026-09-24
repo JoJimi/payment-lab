@@ -341,7 +341,7 @@ CodeRabbit은 **GitHub App**이라 Actions 워크플로가 필요 없습니다. 
 ### 태스크
 
 **3-A. Resilience4j**
-- [ ] **3.1** 데코레이터 **적용 순서 결정** — Retry → CircuitBreaker → TimeLimiter 순서에 따라 동작이 완전히 달라집니다. 순서를 바꿔가며 실험하고 결과를 기록하세요. (기본 순서: Retry가 가장 바깥)
+- [x] **3.1** 데코레이터 **적용 순서 결정** — Retry → CircuitBreaker → TimeLimiter 순서에 따라 동작이 완전히 달라집니다. 순서를 바꿔가며 실험하고 결과를 기록하세요. (기본 순서: Retry가 가장 바깥)
 - [x] **3.2** CircuitBreaker 튜닝 — `slidingWindowSize`, `failureRateThreshold`, `waitDurationInOpenState`, `permittedNumberOfCallsInHalfOpenState`
 - [ ] **3.3** Retry — 지수 백오프 + Jitter. **재시도가 안전한 요청인지(멱등한지) 먼저 확인**하고 적용
 - [ ] **3.4** TimeLimiter — PG 응답 타임아웃. 타임아웃된 결제의 상태는 `UNKNOWN`이지 `FAILED`가 아닙니다. 이 구분이 실무에서 가장 자주 사고 나는 지점입니다.
