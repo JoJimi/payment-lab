@@ -33,11 +33,14 @@ OPEN된다. 그 뒤 남은 재시도 2번은 원본 호출까지 가지 않고 `
 이게 Retry를 가장 바깥에 두는 이유다: 재시도 예산을 진짜 장애 감지와 빠른 실패 양쪽에
 다 쓸 수 있다.
 
-**실험 3 — TimeLimiter는 Retry 안쪽, 개별 시도에 밀착해야 한다**: 원본 호출이 300ms
-걸리고 TimeLimiter 제한이 50ms인 상황에서 `Retry(TimeLimiter(call))`로 구성하면, 느린
-시도 하나가 시간 예산을 다 쓰기 전에 50ms에서 잘려나가고 곧바로 다음 재시도로 넘어간다.
-3번 재시도해도 총 소요 시간은 "300ms × 3 = 900ms 이상"이 아니라 "50ms × 3 + 재시도
-대기시간" 수준(테스트에서는 400ms 미만으로 확인)에 그친다. TimeLimiter가 Retry 밖에
+**실험 3 — TimeLimiter는 Retry 안쪽, 개별 시도에 밀착해야 한다**: `Retry(TimeLimiter(call))`로
+구성하면, 매 시도가 독립적인 시간 예산을 받는다 — 누적되지 않는다. 절대 완료되지 않고
+`get(timeout, unit)`이 호출될 때마다 그 타임아웃 값을 기록하며 즉시 `TimeoutException`을
+던지는 가짜 `Future`로 검증했다(초기 버전은 실제로 300ms 슬립시키고 실제 경과 시간을
+재는 wall-clock 방식이었는데, CI 스케줄링 지연에 따라 간헐적으로 실패할 수 있다는 CodeRabbit
+리뷰를 받아 시간 측정 자체를 없앴다). 결과: 새 `Future`를 정확히 3번 요청했고(=3번
+독립적으로 재시도했고), 매 시도가 요청한 타임아웃이 항상 50ms로 동일했다 — 누적 예산이었다면
+두 번째·세 번째 시도의 남은 예산이 50ms보다 작아졌어야 한다. TimeLimiter가 Retry 밖에
 있었다면 제한 시간이 재시도 전체를 덮어야 해서, Retry의 `maxAttempts`/`waitDuration`과
 TimeLimiter의 `timeoutDuration`이라는 독립적으로 튜닝하고 싶은 두 설정이 서로 얽혀버린다.
 

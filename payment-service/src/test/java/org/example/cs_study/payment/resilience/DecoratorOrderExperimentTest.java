@@ -11,10 +11,11 @@ import io.github.resilience4j.retry.RetryConfig;
 import io.github.resilience4j.timelimiter.TimeLimiter;
 import io.github.resilience4j.timelimiter.TimeLimiterConfig;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
@@ -142,57 +143,92 @@ class DecoratorOrderExperimentTest {
         // 서킷이 열리기 전까지 원본 호출은 딱 1번(4번째, 실패) 더 일어났을 뿐이다 — 나머지
         // 재시도 2번은 CallNotPermittedException으로 즉시 끝나 원본 호출을 하지 않았다.
         assertThat(rawCallCount.get()).isEqualTo(4);
+        // rawCallCount만으로는 부족하다 — ignoreExceptions가 빠졌어도 재시도 자체는 계속
+        // 일어나면서 매번 CallNotPermittedException으로 원본 호출 없이 끝났을 수 있고, 그러면
+        // rawCallCount는 똑같이 4로 남는다(CodeRabbit 리뷰, PR #85). Retry의 총 시도 횟수
+        // (getNumberOfTotalCalls, CB에 거부당한 시도도 "시도"로 센다)까지 확인해야 "재시도
+        // 자체가 멈췄다"는 걸 증명한다 — 첫 논리 호출 3번 시도(실패,실패,성공) + 두 번째
+        // 논리 호출 2번 시도(1번째: 원본 호출 실패로 서킷 OPEN, 2번째: CallNotPermittedException
+        // 즉시 거부 — ignoreExceptions 덕분에 여기서 멈추고 3번째 시도로 넘어가지 않는다)로
+        // 총 5번이어야 한다. ignoreExceptions가 빠졌다면 3번째 시도까지 거부당해 6이 됐을 것이다.
+        assertThat(retry.getMetrics().getNumberOfTotalCalls()).isEqualTo(5);
     }
 
     /**
      * <b>실험 3 — TimeLimiter는 Retry 안쪽, 개별 시도에 밀착해야 한다.</b>
      *
      * <p>TimeLimiter를 Retry 안쪽(각 시도마다 독립 적용)에 두면, 느린 시도 하나가 시간
-     * 예산을 다 쓰기 전에 잘려나가고 곧바로 다음 재시도로 넘어간다. 원본 호출이 300ms
-     * 걸리고 TimeLimiter 제한이 50ms라면, 3번 재시도해도 총 소요 시간은
-     * "300ms × 3"(TimeLimiter가 없거나 Retry 밖에 있었을 때의 상한)이 아니라 대략
-     * "50ms × 3 + 재시도 대기시간" 수준에 그쳐야 한다 — 이게 이 테스트가 증명하는 것이다.
+     * 예산을 다 쓰기 전에 잘려나가고 곧바로 다음 재시도로 넘어간다 — 원본 호출이 아무리
+     * 오래 걸려도 매 시도는 똑같은 타임아웃 예산을 받는다("50ms × 3"이지 시도가 쌓일수록
+     * 남은 예산이 줄어드는 누적 방식이 아니다).
+     *
+     * <p>실제 300ms 슬립과 실제 경과 시간 측정(wall-clock) 대신, {@link Future#get(long,
+     * TimeUnit)}만 흉내 내는 가짜 {@link Future}를 쓴다 — 절대 완료되지 않고 호출될 때마다
+     * 즉시 {@link TimeoutException}을 던지면서 요청받은 타임아웃 값을 기록한다. CI 스케줄링
+     * 지연에 따라 실제 걸린 시간이 흔들려 간헐적으로 실패하는 일(CodeRabbit 리뷰, PR #85)
+     * 자체가 구조적으로 불가능하다 — 시간이 전혀 안 걸리기 때문이다.
      */
     @Test
-    void TimeLimiter가_Retry_안쪽에_있으면_시도마다_독립적으로_잘려_전체_대기시간이_누적되지_않는다() throws Exception {
-        ExecutorService executor = Executors.newCachedThreadPool();
-        try {
-            AtomicInteger attemptCount = new AtomicInteger();
-            // 카운터는 태스크 바디가 아니라 제출 시점에 올린다 — Retry가 몇 번 "시도"했는지를
-            // 재는 것이지, 제출된 태스크가 실행을 시작했는지는 별개다(CodeRabbit 리뷰, PR #85).
-            Supplier<Future<String>> slowFutureSupplier = () -> {
-                attemptCount.incrementAndGet();
-                return executor.submit(() -> {
-                    Thread.sleep(300);
-                    return "OK";
-                });
+    void TimeLimiter가_Retry_안쪽에_있으면_시도마다_독립적인_시간_예산을_받는다() throws Exception {
+        List<Long> requestedTimeoutsMs = new CopyOnWriteArrayList<>();
+        AtomicInteger supplierInvocations = new AtomicInteger();
+
+        // 절대 완료되지 않는 원본 호출을 흉내 낸다 — get(timeout, unit)이 호출될 때마다 그
+        // 타임아웃 값을 기록하고 즉시 TimeoutException을 던진다. 실제로 기다리지 않으므로
+        // 테스트가 순식간에 끝난다.
+        Supplier<Future<String>> neverCompletingFutureSupplier = () -> {
+            supplierInvocations.incrementAndGet();
+            return new Future<String>() {
+                @Override
+                public boolean cancel(boolean mayInterruptIfRunning) {
+                    return false;
+                }
+
+                @Override
+                public boolean isCancelled() {
+                    return false;
+                }
+
+                @Override
+                public boolean isDone() {
+                    return false;
+                }
+
+                @Override
+                public String get() {
+                    throw new UnsupportedOperationException("이 테스트는 timed get()만 사용한다");
+                }
+
+                @Override
+                public String get(long timeout, TimeUnit unit) throws TimeoutException {
+                    requestedTimeoutsMs.add(unit.toMillis(timeout));
+                    throw new TimeoutException("simulated: 절대 완료되지 않음");
+                }
             };
+        };
 
-            TimeLimiter timeLimiter =
-                    TimeLimiter.of("mockPg-exp3", TimeLimiterConfig.custom().timeoutDuration(Duration.ofMillis(50)).build());
-            Retry retry = Retry.of(
-                    "mockPg-exp3",
-                    RetryConfig.custom()
-                            .maxAttempts(3)
-                            .waitDuration(Duration.ofMillis(10))
-                            .retryExceptions(TimeoutException.class)
-                            .build());
+        TimeLimiter timeLimiter =
+                TimeLimiter.of("mockPg-exp3", TimeLimiterConfig.custom().timeoutDuration(Duration.ofMillis(50)).build());
+        Retry retry = Retry.of(
+                "mockPg-exp3",
+                RetryConfig.custom()
+                        .maxAttempts(3)
+                        .waitDuration(Duration.ofMillis(1))
+                        .retryExceptions(TimeoutException.class)
+                        .build());
 
-            // Retry(바깥) → TimeLimiter(안쪽) → 원본 호출.
-            Callable<String> decorated =
-                    Retry.decorateCallable(retry, TimeLimiter.decorateFutureSupplier(timeLimiter, slowFutureSupplier));
+        // Retry(바깥) → TimeLimiter(안쪽) → 원본 호출.
+        Callable<String> decorated = Retry.decorateCallable(
+                retry, TimeLimiter.decorateFutureSupplier(timeLimiter, neverCompletingFutureSupplier));
 
-            long start = System.nanoTime();
-            assertThatThrownBy(decorated::call).isInstanceOf(TimeoutException.class);
-            long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+        assertThatThrownBy(decorated::call).isInstanceOf(TimeoutException.class);
 
-            // 시도 3번 전부 원본 호출(300ms 슬립)이 끝나길 기다렸다면 900ms 이상 걸렸을 것이다.
-            // TimeLimiter가 시도마다 50ms에서 끊었다면 3 * 50ms + 재시도 대기 2 * 10ms 근처,
-            // 넉넉히 잡아도 400ms를 넘지 않는다 — CI 스케줄링 지연을 감안한 보수적인 상한이다.
-            assertThat(elapsedMs).isLessThan(400);
-            assertThat(attemptCount.get()).isEqualTo(3);
-        } finally {
-            executor.shutdownNow();
-        }
+        // 새 Future를 3번 요청했다 — 즉 Retry가 3번 독립적으로 새 시도를 시작했다.
+        assertThat(supplierInvocations.get()).isEqualTo(3);
+        // 매 시도가 요청한 타임아웃이 항상 50ms로 동일하다. 만약 TimeLimiter가 Retry 전체를
+        // 덮는 "누적" 예산이었다면(바깥에 있었다면) 두 번째, 세 번째 시도의 남은 예산은
+        // 50ms보다 작아졌어야 한다 — 매번 정확히 50ms라는 사실 자체가 각 시도가 독립적인
+        // 새 예산을 받는다는 증거다.
+        assertThat(requestedTimeoutsMs).containsExactly(50L, 50L, 50L);
     }
 }
