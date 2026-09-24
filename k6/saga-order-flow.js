@@ -102,8 +102,15 @@ export default function () {
   // 반복이 예산 안에서 시작됐어도 응답 자체가 예산을 넘겨 도착했다면 타임아웃으로
   // 잡아야 한다(부하가 걸렸을 때 Saga가 실제로 느려지는지를 이 지표가 보여줘야 하므로).
   const elapsed = Date.now() - sagaStart;
-  sagaCompletionDuration.add(elapsed);
+  const completed = finalStatus !== 'CREATED' && elapsed <= POLL_TIMEOUT_MS;
+  // CodeRabbit 리뷰 — 타임아웃/조회 실패로 끝난 주문까지 elapsed(사실상 POLL_TIMEOUT_MS
+  // 근처 값)를 saga_completion_duration에 섞으면 p50/p95가 "실제 완료 시간"이 아니라
+  // "완료 여부와 무관하게 얼마나 기다렸는가"로 오염된다. 완료가 확인된 주문만 이 Trend에
+  // 넣고, 타임아웃 비율은 아래 check()의 실패율로 별도 집계한다.
+  if (completed) {
+    sagaCompletionDuration.add(elapsed);
+  }
   check(null, {
-    'Saga가 타임아웃 전에 종결 상태(PAID/FAILED/CANCELLED)로 끝남': () => finalStatus !== 'CREATED' && elapsed <= POLL_TIMEOUT_MS,
+    'Saga가 타임아웃 전에 종결 상태(PAID/FAILED/CANCELLED)로 끝남': () => completed,
   });
 }
