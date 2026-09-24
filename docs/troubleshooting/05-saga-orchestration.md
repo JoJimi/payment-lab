@@ -437,3 +437,75 @@ DLQ는 `order.created-dlt`다.
 `PAYMENT_서비스가_죽으면_타임아웃으로_보상되고_복구후_뒤늦은_응답은_무시된다()`가 이
 가드를 고정한다 — 가드가 없어지면 이 테스트가 예외로 실패하거나 DLT에 레코드가
 남아 실패한다.
+
+### 8. 중복 이벤트 강제 주입 테스트 — 버그는 못 찾았지만 그 자체가 목적을 달성했다 (2.18)
+
+**배경**: 2.14(보상 자체의 멱등성)까지 다룬 "중복"은 서로 다른 `eventId`로 같은
+비즈니스 이벤트가 두 번 발행되는 상황(도메인 상태 가드가 막는 영역)뿐이었다. 더 근본적인
+시나리오가 남아 있었다 — Kafka at-least-once 재전달로 **완전히 같은 `eventId`**가 그대로
+두 번 오는 상황이다. 이건 도메인 가드가 아니라 `InboxService.processIfNew`/`@Idempotent`
+AOP(1단계, 부록 A-1)가 막아야 하는 별도 층위라, 실제로 그 메커니즘이 Saga 리스너
+코드에서도 동작하는지 직접 증명한 적이 없었다.
+
+**대상 선정**: 전체 `@KafkaListener` 10개 중 대표성과 비즈니스 리스크 기준으로 6개만
+골랐다 — 나머지는 전부 같은 `InboxService.processIfNew` 메커니즘을 공유해 개별 검증의
+한계효용이 낮다고 판단했다(이슈 #77).
+
+- **가드가 없는 리스너 2개** (order-service `PaymentCompletedListener`/
+  `InventoryReservedListener`): 중복 실행되면 `SUCCESS → SUCCESS` 상태 전이
+  예외(`InvalidStateTransitionException`)로 `-dlt` 토픽에 쌓였을 것이다 — "DLT가
+  비어있음"으로 정확히 1회 처리를 증명한다.
+- **메커니즘 자체가 다른 리스너 1개** (payment-service `PaymentRequestedListener`):
+  이 프로젝트에서 유일하게 `InboxService`가 아니라 `@Idempotent` AOP로 멱등성을
+  보장한다(2.12 설계 결정) — 별도 메커니즘이라 별도 검증이 필요했다.
+- **도메인 가드가 아예 없는 리스너 1개** (inventory-service `PaymentCompletedListener`):
+  실제 재고 차감(reserve+confirm)이 일어나는 유일한 지점이면서, 이중 실행돼도 예외 없이
+  조용히 통과한다(재고가 남아있는 한 `Inventory.reserve()`가 재호출을 막지 않음) — 그래서
+  "예외 발생 여부"가 아니라 **재고 수치 자체**(이중 차감이면 `10-2×3=4`, 정상이면
+  `10-3=7`)로 증명해야 했다(`SagaListenersIntegrationTest`,
+  `payment_completed가_같은_eventId로_두_번_전달돼도_재고는_한_번만_차감된다`).
+
+**결과**: 6개 리스너 전부 기존 버그가 없었다 — `InboxService`/`@Idempotent`가 설계대로
+동작함을 실제 Saga 리스너 코드로 확인했을 뿐이다. 2.17과 달리 이번엔 실제 버그를 찾지
+못했지만, "강제 주입 테스트가 존재해야 그 사실 자체를 확신할 수 있다"는 점에서 이
+태스크의 목적은 그대로 달성했다고 판단한다 — 멱등성이 "설계상 그럴 것"이 아니라
+"실제로 확인됨"이 됐다.
+
+### 9. Testcontainers 기반 Saga E2E — 정본 회귀 스위트, 그리고 무관한 CI 플레이키 하나 (2.19)
+
+**배경**: 2.11~2.18의 Saga 리스너 테스트(`SagaListenersIntegrationTest` 등)는 전부
+`@EmbeddedKafka`(JVM 인프로세스 브로커)를 썼다. `SagaEndToEndIntegrationTest`
+(order-service)만 진짜 Testcontainers Kafka 컨테이너(`apache/kafka:3.8.0` —
+`docker-compose.yml`의 로컬 Kafka와 같은 이미지, troubleshooting §12)를 띄운다 —
+파티션 배정/컨슈머 그룹 리밸런싱 등 실제 브로커 동작에 더 가까운 환경에서, 핵심
+시나리오 4개(정상 1건 + 보상 3건)가 전부 이어 붙어 도는지 마지막으로 확인하는 "정본
+(canonical) 회귀 스위트"다. 기존 리스너별 테스트를 대체하지 않는다 — 그쪽은 각
+리스너의 세부 계약(가드, 중복 처리, DLQ)을 계속 검증하고, 이 클래스는 "전체가 이어
+붙어 도는가"만 본다.
+
+**`kafkaTemplate.send()`를 직접 부르는 게 Outbox 우회가 아닌 이유**: 이 테스트가
+발행하는 이벤트(`payment.completed`/`payment.failed`/`inventory.reserved`/
+`inventory.failed`)는 전부 payment-service/inventory-service가 "이미 자신의 Outbox를
+거쳐 실제로 내보냈을" 이벤트를 이 테스트가 그 서비스들 대신 흉내내는 것이다
+(`SagaListenersIntegrationTest`와 같은 패턴, 2.10 Semgrep 룰도 이 이유로 `src/test`를
+예외 처리한다). order-service 자신의 발행 경로(`orderService.createOrder()` →
+Outbox)는 이 테스트에서도 실제 코드를 그대로 탄다 — 건드리지 않는다.
+
+**보상 3(타임아웃)만 다른 패턴인 이유**: 나머지 세 시나리오는 Kafka 이벤트를 발행하고
+polling으로 상태 변화를 기다리지만, 타임아웃 시나리오는 애초에 응답 이벤트 자체가 안
+오는 경우를 검증하는 것이라 기다릴 이벤트가 없다. `app.saga.timeout-minutes=0`으로
+생성 즉시 회수 대상이 되게 하고, `SagaTimeoutScheduler.reclaimTimedOutSagas()`를 직접
+호출해 자동 폴링 스케줄러와 테스트의 상태 준비가 경쟁하지 않게 한다
+(`SagaTimeoutSchedulerTest`와 같은 이유, §5).
+
+**PR #80에서 만난 무관한 CI 플레이키**: `build-test`가 이 PR의 마지막 커밋(문서만
+바꾼 커밋)에서 실패했다 — `SagaTimeoutSchedulerTest`의 한 테스트가
+`InvalidStateTransitionException: Saga 스텝 상태를 SUCCESS에서 SUCCESS로 전이할 수
+없습니다`로 죽었다. 이 PR과 무관하다고 판단한 근거 3가지: ① 실패한 커밋은
+`docs/ci-cd.md`만 바꿨고 코드는 직전 커밋과 동일했다, ② 직전 커밋에서는 같은 테스트를
+포함해 전체가 통과했다, ③ 실패를 일으킨 프로덕션 코드(`SagaTimeoutService.reclaim()`)는
+`SagaStep.succeed()`를 어떤 경로로도 호출하지 않는다(`fail()`/`compensate()`만 호출) —
+즉 코드상 그 예외가 날 경로 자체가 없다. 코드 변경 없이 재실행 1회로 통과를 확인했다.
+근본 원인(왜 같은 코드가 가끔 이 상태 전이를 만드는지)은 이 PR 범위 밖으로 남겼다 —
+2.15(Saga 타임아웃) 자체의 잠재적 레이스일 가능성이 있어, 재발하면 별도 조사가
+필요하다.

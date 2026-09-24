@@ -1,8 +1,10 @@
-# 2.20 — 1단계 대비 2단계 성능 비교 (템플릿, 미측정)
+# 2.20 — 1단계 대비 2단계 성능 비교
 
 로드맵 2.20. 시나리오는 `k6/saga-order-flow.js`(주문 생성 → Saga 완료까지 폴링),
-실행은 `scripts/measure-saga-baseline.sh`. 이 원격 세션은 Docker가 없어 직접 측정할 수
-없다 — 아래는 로컬에서 채워 넣을 틀만 미리 준비해둔 것이다(`03-baseline.md`와 같은 형식).
+실행은 `scripts/measure-saga-baseline.sh`. 로컬(Windows, Git Bash + Docker Desktop)에서
+2026-09-24 실측했다. 측정 과정에서 겪은 문제(재고 시드 데이터 부재, 로컬 리소스 경합으로
+VUs=20 전체 실패 등)와 그 대응은 [troubleshooting/06-saga-performance-measurement.md]
+(../docs/troubleshooting/06-saga-performance-measurement.md)에 별도로 기록했다.
 
 ## 측정 환경
 
@@ -11,10 +13,12 @@
 | 대상 | order-service(`:8081`) — payment/inventory/notification-service는 Kafka 이벤트로 간접 참여 |
 | DLQ 재시도 | 500ms 간격, 최초 시도 포함 총 3회 (`common-kafka`, 2.16) |
 | Saga 타임아웃 | 기본 10분(`app.saga.timeout-minutes`), 폴링 주기 30초 |
-| VUs / Duration | 20 / 60s (1.21과 동일 — 단, 아래 "참고"의 부하 동등성 주의사항 참고) |
+| **VUs (공식 측정값)** | **5** — 20이 아니다. 아래 "VUs별 부하 한계 탐색" 참고 — 로컬 머신(서비스 4개 JVM + mock-pg-server + Kafka + Postgres 3개 + Redis 동시 구동)에서 VUs=10부터 이미 미종결률이 나타나, 측정한 부하(1/5/10/20) 중 미종결률 0%가 관측된 최대값인 5로 확정했다(3회 측정 기준 — 항상 0%를 보장한다는 뜻은 아니다) |
+| Duration | 60s |
 | 반복 | 워밍업 1회 + 측정 3회, 중앙값 |
 | 대상 상품 | 단일 상품(`PRODUCT_ID=1`, 재고 100000) — 1.21과 동일한 한계(단일 핫로우 경합)가 그대로 적용됨 |
 | `POLL_TIMEOUT_MS` | 15000 (기본값 — Saga 완료를 기다리는 최대 시간, 이 안에 안 끝나면 미완료로 집계) |
+| 상품 시드 | 마이그레이션에 시드 데이터가 없어 `products`/`inventory`에 `product_id=1` 행을 수동으로 INSERT한 뒤 측정(06번 문서 참고) |
 
 ## 실행 방법
 
@@ -27,39 +31,72 @@ set -a && source ./.env && set +a
 ./gradlew payment-service:bootRun &
 ./gradlew inventory-service:bootRun &
 ./gradlew notification-service:bootRun &
-./scripts/measure-saga-baseline.sh
+VUS=5 ./scripts/measure-saga-baseline.sh
 ```
 
-## 결과 (미측정 — 로컬에서 채울 것)
+## 결과 — 공식 측정 (VUs=5)
 
 3회 측정 원본:
 
-| 회차 | order_api p50 | order_api p95 | saga_completion p50 | saga_completion p95 | Saga 타임아웃 내 종결 실패율 | 실측 주문 생성률(iterations/s) |
+| 회차 | order_api p50 | order_api p95 | saga_completion p50 | saga_completion p95 | 15초 폴링 제한 내 미종결률 | 실측 주문 생성률(iterations/s) |
 |---|---|---|---|---|---|---|
-| 1 | | | | | | |
-| 2 | | | | | | |
-| 3 | | | | | | |
-
-마지막 열(`실측 주문 생성률`)은 `benchmarks/raw/saga-run*.json`의 `metrics.iterations.values.rate`
-값을 그대로 옮겨 적을 것 — 아래 "참고"의 부하 동등성 주의사항 때문에 반드시 채워야 한다.
+| 1 | 272ms | 850.14ms | 4.97s | 9.70s | 0% | 0.9426/s |
+| 2 | 186ms | 863.74ms | 4.93s | 7.57s | 0% | 0.9757/s |
+| 3 | 130.5ms | 320.25ms | 3.31s | 7.23s | 0% | 1.3347/s |
 
 중앙값(지표별):
 
 | 지표 | 값 |
 |---|---|
-| order_api_duration p50 | |
-| order_api_duration p95 | |
-| saga_completion_duration p50 | |
-| saga_completion_duration p95 | |
-| Saga 타임아웃 내 종결 실패율 | |
+| order_api_duration p50 | 186ms |
+| order_api_duration p95 | 850.14ms |
+| saga_completion_duration p50 | 4.93s |
+| saga_completion_duration p95 | 7.57s |
+| 15초 폴링 제한 내 미종결률 | 0% |
+| 실측 주문 생성률(iterations/s) | 0.9757/s |
 
-## 1단계 대비 비교 (미작성)
+## VUs별 부하 한계 탐색
 
-| 지표 | 1단계 (`03-baseline.md`) | 2단계 order_api | 2단계 saga_completion |
+정식 측정을 VUs=20이 아니라 5로 확정한 근거. 셋 다 동일 조건(`DURATION=60s`,
+`POLL_TIMEOUT_MS=15000` 기본값)으로 측정했다 — VUs=20만 추가로 워밍업 10s 포함.
+
+| VUs | 15초 폴링 제한 내 미종결률 (3회 중앙값) | order_api p50 | order_api p95 | 실측 주문 생성률 |
+|---|---|---|---|---|
+| 5 | **0%** | 186ms | 850ms | 0.976/s |
+| 10 | 57% | 2.37s | 6.81s | 0.665/s |
+| 20 | **100%** | 5.26s | 15.98s | 1.066/s |
+
+```
+15초 폴링 제한 내 미종결률
+VUs=5   ░░░░░░░░░░   0%
+VUs=10  ██████░░░░   57%
+VUs=20  ██████████   100%
+```
+
+VUs=5→10 사이에서 급격히 무너진다 — 이 로컬 머신(서비스 4개 JVM + mock-pg-server + Kafka
++ Postgres 3개 + Redis + k6를 한 데스크톱에서 동시 구동)이 감당하는 한계이지, 2단계
+아키텍처 자체의 처리량 한계가 아니다. `order_api_duration`(동기 API 하나 응답)조차
+VUs=5의 ~186ms에서 VUs=20의 ~5.26s로 튀는 현상은 호스트 리소스 경합을 시사하지만, CPU
+계측을 직접 하지 않았으므로 CPU 경합을 원인으로 확정할 수는 없다 — DB 또는 Kafka
+병목과도 구분되지 않는다(자세한 진단 과정은
+`docs/troubleshooting/06-saga-performance-measurement.md` 참고).
+
+**참고(진단용, 정식 측정 아님)** — VUs=20에 `POLL_TIMEOUT_MS=60000`을 줘서 "부하 상황에서
+결국 얼마나 걸려서 끝나는가"만 확인한 결과(`DURATION=10s`, 표본 22~25건/회차로 정식
+측정보다 적음): `saga_completion_duration` 중앙값 18.5~32s, p95 최대 37s. VUs=5 대비
+6~10배 느려진다 — 안 끝나는 게 아니라, 이 머신에서 VUs=20을 감당 못 해 심하게 밀리는 것.
+
+## 1단계 대비 비교
+
+**주의 — VUs가 다르다(1단계 20 vs 2단계 5).** 로컬 리소스 제약 때문에 2단계는 5로 낮춰
+측정했다("VUs별 부하 한계 탐색" 참고) — 아래 비교는 "같은 부하에서의 비교"가 아니라
+**서로 다른 부하 수준에서 각자 안정적으로 측정 가능했던 값**이라는 점을 감안해서 볼 것.
+
+| 지표 | 1단계 (`03-baseline.md`, VUs=20) | 2단계 order_api (VUs=5) | 2단계 saga_completion (VUs=5) |
 |---|---|---|---|
-| p50 | 1.63s | | |
-| p95 | 5.54s | | |
-| TPS | 9.23/s | | |
+| p50 | 1.63s | 0.19s | 4.93s |
+| p95 | 5.54s | 0.85s | 7.57s |
+| TPS / 실측 주문 생성률 | 9.23/s | — | 0.976/s |
 
 **주의 — 1단계 p50/p95는 같은 범위의 지표가 아니다**(CodeRabbit 리뷰, PR #82).
 `03-baseline.md`의 1.63s/5.54s는 `k6/order-payment-flow.js`가 별도 Trend 없이 남긴 k6
@@ -69,13 +106,19 @@ set -a && source ./.env && set +a
 Saga 종결까지)를 재는 커스텀 Trend다. 그래서 이 표의 p50/p95 비교는 "정확히 같은 범위의
 숫자"가 아니라 참고용 근사치로만 볼 것 — 엄밀히 비교하려면 1단계 스크립트에도 주문
 요청부터 결제 응답까지를 묶는 Trend를 추가해야 하는데, 그건 이미 완료된 1단계 산출물을
-건드리는 일이라 이번 PR 범위 밖으로 남겨둔다. TPS(9.23/s)는 k6의 `iterations.rate`
-기반이라 이 문제가 없다 — 2단계 쪽 TPS는 위 "실측 주문 생성률" 열과 직접 비교 가능하다.
+건드리는 일이라 범위 밖으로 남겨둔다.
 
-`order_api_duration`은 1단계보다 빨라질 것으로 예상한다(주문 생성이 더 이상 결제 승인을
-동기로 기다리지 않으므로) — 반면 `saga_completion_duration`은 Outbox 릴레이 폴링 주기 x
-여러 홉이 더해져 1단계의 동기 왕복보다 느려질 가능성이 높다(로드맵 2.20 자체가 예고한
-트레이드오프). 실측 후 이 예상이 맞는지, 그리고 얼마나 차이 나는지를 여기 기록할 것.
+**결과 요약**: `order_api_duration`(p50 0.19s)은 1단계의 개별 주문·결제 HTTP 요청을
+합친 `http_req_duration` 분포(p50 1.63s)보다 낮다 — 다만 위 주의사항대로 측정 범위와
+VUs가 다른 지표라, 이 수치 차이만으로 "전체 왕복 시간이 더 빨라졌다"고 결론 내릴 수는
+없다. 참고로 주문 생성이 더 이상 결제 승인을 동기로 기다리지 않는다는 설계 변경 자체는
+사실이다. 반대로 `saga_completion_duration`(p50 4.93s)은 1단계보다 3배 가까이 느리다 — Outbox
+릴레이 폴링 주기 × 3홉(order→payment, payment→order/inventory, inventory→
+order/notification)이 누적된 결과로, 로드맵 2.20이 예고한 "응답은 빨라지지만 완료는
+느려진다"는 트레이드오프가 실측으로 확인됐다. 다만 VUs가 다르다는 위 주의사항 때문에,
+이 차이의 얼마만큼이 아키텍처 트레이드오프이고 얼마만큼이 부하 차이 때문인지는 완전히
+분리되지 않는다 — 동일 하드웨어에서 VUs를 맞춰 재측정하는 것이 이상적이나 이번 측정
+환경(개발자 로컬 데스크톱)에서는 불가능했다.
 
 ## 참고
 
@@ -99,7 +142,17 @@ Saga 종결까지)를 재는 커스텀 Trend다. 그래서 이 표의 p50/p95 �
 - 1단계 베이스라인과 같은 한계(단일 상품 핫로우 경합, `03-baseline.md` "참고" 절)가
   이 측정에도 그대로 적용된다 — "클린한 베이스라인"이 아니라 "이 특정 경합 패턴에서의
   숫자"로 해석할 것.
-- `saga_completion_duration`이 `POLL_TIMEOUT_MS`를 자주 넘긴다면, 그 자체가 부하 상황에서
-  Outbox 릴레이나 Kafka 컨슈머가 밀리고 있다는 신호다 — `POLL_TIMEOUT_MS`를 늘려 재측정하기
-  전에 먼저 원인(릴레이 폴링 주기, 컨슈머 처리량)을 의심할 것.
+- `saga_completion_duration`은 `elapsed <= POLL_TIMEOUT_MS`인 완료 사례만 기록하는
+  Trend라 정의상 15초를 넘을 수 없다 — 대신 "15초 폴링 제한 내 미종결률"이 높다면, 그
+  자체가 부하 상황에서 Outbox 릴레이나 Kafka 컨슈머가 밀리고 있다는 신호일 수 있다.
+  `POLL_TIMEOUT_MS`를 늘려 재측정하기 전에 먼저 원인(릴레이 폴링 주기, 컨슈머 처리량)을
+  의심할 것. **이번 측정에서 VUs=20의 미종결은 컨슈머/릴레이 자체의 결함보다는 로컬
+  머신의 리소스 경합을 시사한다** — VUs=1에서는 Saga가 2~4초 안에 정상 완료됐다("VUs별
+  부하 한계 탐색" 참고). 다만 CPU/DB/Kafka 중 정확히 어느 리소스가 병목인지는 계측하지
+  않아 특정하지 못했다. 서버급 환경(3단계 이후 후보)에서 재측정하면 VUs=20에서도
+  미종결률 0%가 나올 가능성이 높다.
+- `products`/`inventory` 마이그레이션에는 시드 데이터가 없다 — 신선한 DB에서 처음 측정하려면
+  `product_id=1` 행을 수동으로 만들어야 한다(`docs/troubleshooting/06-saga-performance-measurement.md`
+  참고). `scripts/measure-saga-baseline.sh`는 이 행이 없으면 `UPDATE 0`으로 조용히 넘어가지
+  않고 즉시 에러로 종료하도록 되어 있다(CodeRabbit 리뷰, PR #82).
 - 3단계 종합 벤치마크 리포트(3.12)도 이 비교표와 함께 참조한다.
