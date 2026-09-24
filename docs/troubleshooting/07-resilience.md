@@ -254,3 +254,57 @@ TIMEOUT(BulkheadFullException으로 즉시 거부)이었다. 5회 반복 실행�
 개수에 확실한 상한이 생겼다는 점이 3.4와의 차이다 — 전에는 무제한으로 늘어날 수 있었다.
 Fallback 설계(서킷이 OPEN이거나 Bulkhead가 가득 찼을 때 무엇을 돌려줄지)는 3.6에서
 이어간다.
+
+### 6. Fallback 설계 — 즉시 실패(UNKNOWN)로 확정하고, 회수는 Saga 타임아웃에 맡긴다 (3.6)
+
+**배경**: 3.1~3.5가 배선한 네 데코레이터(Retry/CircuitBreaker/TimeLimiter/Bulkhead)는
+모두 결국 같은 질문에 부딪힌다 — 서킷이 OPEN이거나, PG가 시간 안에 응답하지 않거나,
+Bulkhead가 가득 차서 원본 호출 자체를 시도하지 못했을 때 `PaymentService`에 무엇을
+돌려줄 것인가? 로드맵 3.6이 제시하는 선택지는 두 가지다: **즉시 실패**(그 자리에서
+확정하지 못한 상태로 응답을 끝냄) vs **큐잉 후 지연 처리**(요청을 어딘가에 쌓아뒀다가
+장애가 풀리면 다시 시도함).
+
+**결정 — 이미 3.2에서 내려져 있었다**: `ResilientMockPgGateway.requestPayment`는 네
+데코레이터가 던지는 모든 기술적 실패(`MockPgUnavailableException`, `CallNotPermittedException`,
+`TimeoutException`, `BulkheadFullException`)를 한 catch 블록에서 잡아 즉시
+`MockPgResult.timedOut()`으로 번역해 돌려준다(큐잉도, 별도 재시도 스레드도 없다) —
+"즉시 실패"다. `PaymentService.applyResult`는 이 `TIMEOUT`을 받으면 `payment.markUnknown()`만
+하고 `payment.completed`도 `payment.failed`도 Outbox에 적재하지 않는다(위 Javadoc,
+`applyResult` 참고). 즉 payment-service는 "모르겠다"는 사실 자체를 이벤트로 확정 짓지
+않고 조용히 멈춘다 — order-service의 Saga는 PAYMENT 단계에 `STARTED`로 그대로 남는다.
+
+**왜 큐잉이 아니라 즉시 실패인가**: 이 시스템의 "지연 처리" 메커니즘은 이미 다른 곳에
+존재한다 — `SagaTimeoutScheduler`(2.15)가 30초마다(`app.saga.timeout.scheduler.fixed-delay-ms`)
+`timeout_at`을 넘긴 채 `STARTED`로 멈춘 Saga를 찾아 `SagaTimeoutService.reclaim`으로
+회수한다. payment-service 안에 큐잉이나 재시도 워커를 따로 만들면 이미 있는 이 회수
+경로와 사실상 같은 일을 하는 두 번째 메커니즘이 생긴다 — 서로 다른 두 컴포넌트가 "이
+결제, 아직 살아있나?"를 각자 판단하게 되고, 둘의 타이밍이 어긋나면(예: payment-service
+내부 큐가 재시도하는 도중 Saga가 먼저 타임아웃으로 보상을 시작) 이중 처리나 레이스가
+생길 여지가 커진다. "확정하지 못하면 즉시 UNKNOWN으로 끝내고 회수는 상위(Saga)에
+맡긴다"는 원칙 하나로 통일하는 편이 안전하다 — 1단계 부록 A-1이 정한 "TIMEOUT은 FAILED가
+아니라 UNKNOWN"이라는 원칙의 3단계판 확장이다(3.2 문서 참고).
+
+**Saga 타임아웃 로직과의 연계 — 예산이 실제로 맞는지 확인한다**: "즉시 실패 후 상위가
+회수한다"는 설계가 성립하려면 Resilience4j가 재시도하며 실제로 소비하는 최악의 시간이
+Saga의 타임아웃 예산보다 충분히 작아야 한다 — 그렇지 않으면 Saga가 아직 재시도 중인
+결제를 성급하게 타임아웃으로 회수해 보상을 시작해버리는 레이스가 생긴다.
+`application.yml`(payment-service)의 현재 값으로 최악의 경우를 계산하면:
+- 시도 1회당 상한은 `TimeLimiter`의 `timeout-duration`(3s)이다 — 3.5에서 확인했듯 이
+  상한은 Bulkhead 큐 대기 시간까지 포함해서 잰다(`TimeLimiter`가 `futureSupplier.get()`
+  으로 제출한 직후부터 시계가 돈다).
+- `Retry`는 `max-attempts: 3`, 초기 대기 500ms에 배율 2인 지수 백오프(500ms → 1000ms),
+  여기에 ±50% 지터가 얹힌다 — 두 백오프 구간의 최악값 합은 (500+1000)×1.5 = 2250ms.
+- 최악의 총 소요시간 ≈ 3 × 3s(TimeLimiter 상한) + 2.25s(백오프) = **약 11.25초**.
+
+`app.saga.timeout-minutes`(order-service, 기본값 10분 = 600초)는 이 최악값의 50배가
+넘는다 — Resilience4j가 정상적으로 재시도를 다 소진하고 최종적으로 UNKNOWN을 확정하는
+동안 Saga 타임아웃 스케줄러가 먼저 끼어들 여지는 사실상 없다. 두 예산 사이에 이 정도
+여유를 둔 것은 우연이 아니다 — Saga 타임아웃은 애초에 "실패 이벤트조차 안 오는" 훨씬
+드문 장애(서비스 다운, 메시지 유실, 2.15 문서 참고)를 겨냥해 넉넉하게 잡은 값이고,
+Resilience4j는 그보다 훨씬 빠른 시간 안에 자체적으로 결론(승인/거절/UNKNOWN)을 낸다 —
+서로 다른 시간 스케일에서 서로 다른 장애를 겨냥하도록 설계돼 있다.
+
+**결론**: 3.6은 새로 구현할 코드가 없다 — 3.2가 도입한 예외→UNKNOWN 즉시 번역과 2.12/2.15가
+이미 갖춘 "이벤트가 없으면 Saga가 타임아웃으로 회수한다"는 경로가 그 자체로 이 설계
+요구사항을 만족한다. 이 절은 그 사실을 명시적으로 검증하고 기록해, "왜 payment-service
+안에 별도 재시도 큐를 안 뒀는가"라는 질문에 근거를 남기는 것이 목적이다.
