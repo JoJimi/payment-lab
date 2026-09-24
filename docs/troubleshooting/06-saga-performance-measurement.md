@@ -57,13 +57,13 @@ Saga 전체 완료는 Outbox 릴레이 폴링 + Kafka 홉이 늘어나 느려질
 | 5 | `./scripts/measure-saga-baseline.sh: No such file or directory` | 스크립트/k6 시나리오/비교 문서 4개 파일이 별도 브랜치에만 있고 `main`에 병합된 적이 없었음 | 4개 신규 파일만 골라 `main` 기준 PR로 오픈 | [PR #82](https://github.com/JoJimi/payment-lab/pull/82) |
 | 6 | CodeRabbit 리뷰 Major 6건 + Minor 4건 + outside-diff 2건 — 측정 방법론 자체의 결함 (부하 동등성 미검증, 타임아웃 판정이 stale한 시각 기준, 타임아웃된 주문이 완료 시간 분포를 오염, `OrderStatus`만으로는 Saga 완료를 알 수 없음 등) | 최초 버전은 "일단 동작하는" 수준으로만 작성됨 — 부하 측정 도구 특유의 함정(닫힌 루프 모델, stale 타임스탬프, 편향된 분포)을 처음부터 고려하지 못함 | 라운드별로 수정·재리뷰 반복. 가장 큰 변경은 `OrderResponse`에 `sagaStatus` 필드 추가(프로덕션 코드 변경, 사용자 승인 하에 진행) — `OrderStatus=PAID`만으로는 재고 예약/알림 발행이 끝났는지 알 수 없어서 결제만 끝나도 "Saga 완료"로 오판하고 있었음 | PR #82 리뷰 스레드 12건, 전부 해결 |
 | 7 | `UPDATE inventory ... WHERE product_id=1`이 0건 갱신 | `products`/`inventory` 마이그레이션(V1~V5)에 시드 데이터가 없음 — 신선한 DB에는 애초에 `product_id=1` 행 자체가 존재하지 않음. `inventory-service`엔 상품 생성 API도 없어(`ProductController`는 조회만 지원) 수동 INSERT가 유일한 경로 | ① 스크립트에 `RETURNING product_id` 검증 추가해 0건 갱신 시 즉시 에러 종료(조용한 무효 측정 방지) ② 측정 전 `products`/`inventory`에 `product_id=1` 행을 수동 INSERT | PR #82 마지막 커밋 |
-| 8 | VUs=20에서 Saga 타임아웃 내 종결 실패율 **100%** (240건 전부), `order_api_duration`조차 평균 5~8s로 비정상적으로 느림 | 처음엔 로직 버그를 의심했으나, VUs=1로 재현하자 Saga가 2~4초 안에 정상 완료 — 로직은 정상. 원인은 로컬 데스크톱 한 대에서 JVM 4개(order/payment/inventory/notification) + mock-pg-server + Kafka + Postgres 3개 + Redis + k6(VUs=20)를 동시에 돌리며 생긴 CPU 경합 | VUs=5/10/20 비교 측정으로 이 머신이 감당하는 한계를 확인 → **VUs=5**를 공식 측정값으로 확정 | `benchmarks/04-saga-comparison.md` "VUs별 부하 한계 탐색" |
+| 8 | VUs=20에서 15초 폴링 제한 내 미종결률 **100%** (240건 전부), `order_api_duration`조차 평균 5~8s로 비정상적으로 느림 | 처음엔 로직 버그를 의심했으나, VUs=1로 재현하자 Saga가 2~4초 안에 정상 완료 — 로직은 정상. 로컬 데스크톱 한 대에서 JVM 4개(order/payment/inventory/notification) + mock-pg-server + Kafka + Postgres 3개 + Redis + k6(VUs=20)를 동시에 돌리며 생긴 리소스 경합으로 추정(CPU를 직접 계측하지는 않음) | VUs=5/10/20 비교 측정으로 이 머신이 감당하는 한계를 확인 → **VUs=5**를 공식 측정값으로 확정 | `benchmarks/04-saga-comparison.md` "VUs별 부하 한계 탐색" |
 
 ## 성과 수치
 
 ### VUs별 부하 한계 (문제 8의 근거)
 
-| VUs | Saga 타임아웃 내 종결 실패율 | order_api_duration p50 | order_api_duration p95 |
+| VUs | 15초 폴링 제한 내 미종결률 | order_api_duration p50 | order_api_duration p95 |
 |---|---|---|---|
 | 1 | 0% | ~120ms | ~170ms |
 | **5 (채택)** | **0%** | 186ms | 850ms |
@@ -71,17 +71,18 @@ Saga 전체 완료는 Outbox 릴레이 폴링 + Kafka 홉이 늘어나 느려질
 | 20 | 100% | 5.26s | 15.98s |
 
 ```
-Saga 타임아웃 실패율                 order_api_duration p95
+15초 폴링 제한 내 미종결률           order_api_duration p95
 VUs=1   ░░░░░░░░░░   0%             ▏ 0.17s
 VUs=5   ░░░░░░░░░░   0%             █ 0.85s
 VUs=10  ██████░░░░   57%            ████████ 6.81s
 VUs=20  ██████████   100%           ███████████████████ 15.98s
 ```
 
-VUs=1→5는 완만하고(실패율 0% 유지), VUs=5→10에서 급격히 무너진다 — 이 하드웨어의
+VUs=1→5는 완만하고(미종결률 0% 유지), VUs=5→10에서 급격히 무너진다 — 이 하드웨어의
 한계가 5와 10 사이 어딘가에 있다는 뜻이다. `order_api_duration`(부하와 무관해야 할
-단순 동기 저장 API)조차 VUs와 함께 선형 이상으로 느려지는 건, Saga 로직이 아니라
-**호스트 CPU 경합**이 원인이라는 직접적 증거다.
+단순 동기 저장 API)조차 VUs와 함께 선형 이상으로 느려지는 건 Saga 로직이 아니라 호스트
+리소스 경합을 시사한다 — 다만 CPU를 직접 계측하지는 않아 CPU/DB/Kafka 중 어느 쪽이
+병목인지 정확히 특정하지는 못했다.
 
 ### CodeRabbit 리뷰 대응 (문제 6의 근거)
 
