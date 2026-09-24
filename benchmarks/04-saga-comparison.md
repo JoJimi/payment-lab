@@ -11,7 +11,7 @@
 | 대상 | order-service(`:8081`) — payment/inventory/notification-service는 Kafka 이벤트로 간접 참여 |
 | DLQ 재시도 | 500ms 간격, 최초 시도 포함 총 3회 (`common-kafka`, 2.16) |
 | Saga 타임아웃 | 기본 10분(`app.saga.timeout-minutes`), 폴링 주기 30초 |
-| VUs / Duration | 20 / 60s (1.21과 동일 — 비교 가능성 유지) |
+| VUs / Duration | 20 / 60s (1.21과 동일 — 단, 아래 "참고"의 부하 동등성 주의사항 참고) |
 | 반복 | 워밍업 1회 + 측정 3회, 중앙값 |
 | 대상 상품 | 단일 상품(`PRODUCT_ID=1`, 재고 100000) — 1.21과 동일한 한계(단일 핫로우 경합)가 그대로 적용됨 |
 | `POLL_TIMEOUT_MS` | 15000 (기본값 — Saga 완료를 기다리는 최대 시간, 이 안에 안 끝나면 미완료로 집계) |
@@ -34,11 +34,14 @@ set -a && source ./.env && set +a
 
 3회 측정 원본:
 
-| 회차 | order_api p50 | order_api p95 | saga_completion p50 | saga_completion p95 | Saga 타임아웃 내 종결 실패율 |
-|---|---|---|---|---|---|
-| 1 | | | | | |
-| 2 | | | | | |
-| 3 | | | | | |
+| 회차 | order_api p50 | order_api p95 | saga_completion p50 | saga_completion p95 | Saga 타임아웃 내 종결 실패율 | 실측 주문 생성률(iterations/s) |
+|---|---|---|---|---|---|---|
+| 1 | | | | | | |
+| 2 | | | | | | |
+| 3 | | | | | | |
+
+마지막 열(`실측 주문 생성률`)은 `benchmarks/raw/saga-run*.json`의 `metrics.iterations.rate`
+값을 그대로 옮겨 적을 것 — 아래 "참고"의 부하 동등성 주의사항 때문에 반드시 채워야 한다.
 
 중앙값(지표별):
 
@@ -65,6 +68,17 @@ set -a && source ./.env && set +a
 
 ## 참고
 
+- **VU 수가 같다고 부하(주문 유입률)가 같은 건 아니다**(CodeRabbit 리뷰, PR #82).
+  `constant-vus`는 닫힌 루프(closed workload) 모델이라, 각 VU가 "이전 반복(주문 생성 +
+  Saga 완료 폴링)이 끝나야 다음 반복을 시작한다." 2단계는 폴링 대기 때문에 반복 1회가
+  1단계보다 오래 걸릴 가능성이 높고, 그러면 같은 VUs=20이어도 실제 초당 주문 생성
+  건수(`iterations.rate`)는 1단계보다 **적어진다** — 즉 2단계 쪽이 더 가벼운 부하에서
+  측정된 걸 수 있다. 그래서 위 결과표에 회차별 `iterations.rate`를 반드시 같이 기록하고,
+  1단계 결과(`03-baseline.md`, k6 요약의 `iterations.rate` 또는 TPS)와 비교해 두 부하가
+  실제로 비슷한 수준이었는지 먼저 확인할 것. 크게 다르면(예: 2배 이상 차이) 숫자를
+  "같은 부하에서의 비교"로 해석하지 말고, 그 차이 자체를 결과에 명시할 것 — 필요하면
+  `ramping-arrival-rate` executor(요청 도착률을 직접 고정하는 열린 루프 모델)로 재측정하는
+  것도 3단계 이후 고려 대상으로 남겨둔다.
 - 1단계 베이스라인과 같은 한계(단일 상품 핫로우 경합, `03-baseline.md` "참고" 절)가
   이 측정에도 그대로 적용된다 — "클린한 베이스라인"이 아니라 "이 특정 경합 패턴에서의
   숫자"로 해석할 것.

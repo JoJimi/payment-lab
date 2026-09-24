@@ -1,22 +1,34 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
-import { Trend } from 'k6/metrics';
+import { Rate, Trend } from 'k6/metrics';
 
 // 2.20 — 1단계 대비 2단계(서비스 분리 + Kafka Saga) 성능 비교.
 //
-// 1단계(k6/order-payment-flow.js)는 주문 생성 → 결제 요청, 두 동기 API 호출의 왕복
-// 시간을 측정했다. 2단계는 결제/재고/알림이 전부 Kafka Saga로 비동기 처리되므로
-// "주문 생성 API 응답 시간"과 "Saga가 실제로 끝나는 시간"이 서로 다른 지표가 됐다 —
-// 이 스크립트는 둘 다 별도 Trend로 측정해서 "API 응답은 빨라졌지만 실제 완료까지는
-// 더 걸릴 수 있다"는 트레이드오프를 숫자로 남긴다(로드맵 2.20 의도, docs/stages/
-// 03-service-split-saga.md "다음 단계로 넘기는 숙제" 참고).
+// 1단계(k6/order-payment-flow.js)는 주문 생성 요청을 보낸 시점부터 결제 응답을 받을
+// 때까지, 동기 호출 두 개의 전체 왕복 시간을 측정했다. 2단계는 결제/재고/알림이 전부
+// Kafka Saga로 비동기 처리되므로 "주문 생성 API 응답 시간"과 "Saga가 실제로 끝나는
+// 시간"이 서로 다른 지표가 됐다 — 이 스크립트는 둘 다 별도 Trend로 측정한다.
+// `saga_completion_duration`은 (CodeRabbit 리뷰, PR #82) 주문 API 응답 이후가 아니라
+// **주문 요청을 보낸 시점부터** 잰다 — 1단계 지표와 같은 범위(요청 시작~최종 완료)라야
+// "API 응답은 빨라졌지만 실제 완료까지는 더 걸릴 수 있다"는 트레이드오프를 공정하게
+// 비교할 수 있다(로드맵 2.20 의도, docs/stages/03-service-split-saga.md "다음 단계로
+// 넘기는 숙제" 참고).
 //
 // 이 세션(Docker 없는 원격 컨테이너)에서는 실행할 수 없다 — order/payment/inventory/
 // notification 4개 서비스 + Kafka + Postgres 3개 + Redis가 전부 로컬에 떠 있어야
 // 한다. 로컬에서 scripts/measure-saga-baseline.sh로 실행할 것.
 
 const orderApiDuration = new Trend('order_api_duration', true);
+// CodeRabbit 리뷰(PR #82) — sagaStart를 orderStart와 같게 잡아 "주문 요청 시작부터 Saga
+// 완료까지"를 측정한다. 1단계 스크립트가 재는 것도 "주문 생성 요청 시작부터 결제 응답까지"
+// 전체 왕복 시간이라, 이렇게 맞춰야 두 지표가 같은 범위를 비교하게 된다(주문 API 응답
+// 시간만 뺀 "응답 후 대기 시간"으로는 2단계가 부당하게 빨라 보인다).
 const sagaCompletionDuration = new Trend('saga_completion_duration', true);
+// CodeRabbit 리뷰 — check()만으로는 실패해도 k6 실행 자체는 성공(exit 0)한다. 주문
+// 생성이 실패하기 시작해도 measure-saga-baseline.sh가 그 결과를 그대로 저장하고 다음
+// 회차로 넘어가버리는 걸 막으려고, 이 비율에 threshold를 걸어 실패율이 높으면 k6
+// 자체가 실패하게 한다.
+const orderSuccessRate = new Rate('order_success_rate');
 
 export const options = {
   scenarios: {
@@ -25,6 +37,9 @@ export const options = {
       vus: Number(__ENV.VUS || 20),
       duration: __ENV.DURATION || '60s',
     },
+  },
+  thresholds: {
+    order_success_rate: ['rate>0.99'],
   },
 };
 
@@ -55,22 +70,21 @@ export default function () {
   );
   orderApiDuration.add(Date.now() - orderStart);
 
-  check(orderRes, {
+  const orderCreated = check(orderRes, {
     '주문 생성 201': (r) => r.status === 201,
   });
+  orderSuccessRate.add(orderCreated);
   if (orderRes.status !== 201) {
     return; // 검증 실패 등 — 1단계 스크립트의 재고부족(409) 분기와 달리 2단계는
     // 가격/수량을 클라이언트가 보내므로 이 경로는 거의 항상 요청 자체의 문제다.
   }
 
   const order = JSON.parse(orderRes.body);
-  const sagaStart = Date.now();
+  const sagaStart = orderStart;
   let finalStatus = 'CREATED';
-  let elapsed = 0;
 
-  while (elapsed < POLL_TIMEOUT_MS) {
+  while (Date.now() - sagaStart < POLL_TIMEOUT_MS) {
     sleep(POLL_INTERVAL_MS / 1000);
-    elapsed = Date.now() - sagaStart;
 
     const getRes = http.get(`${ORDER_SERVICE_URL}/api/orders/${order.id}`);
     if (getRes.status !== 200) {
@@ -83,8 +97,13 @@ export default function () {
     }
   }
 
-  sagaCompletionDuration.add(Date.now() - sagaStart);
+  // CodeRabbit 리뷰 — 타임아웃 판정은 루프 안에서 GET 요청 전에 계산해둔 stale한
+  // elapsed가 아니라, 응답을 실제로 받은 뒤의 시각으로 다시 계산해야 한다. 마지막
+  // 반복이 예산 안에서 시작됐어도 응답 자체가 예산을 넘겨 도착했다면 타임아웃으로
+  // 잡아야 한다(부하가 걸렸을 때 Saga가 실제로 느려지는지를 이 지표가 보여줘야 하므로).
+  const elapsed = Date.now() - sagaStart;
+  sagaCompletionDuration.add(elapsed);
   check(null, {
-    'Saga가 타임아웃 전에 종결 상태(PAID/FAILED/CANCELLED)로 끝남': () => finalStatus !== 'CREATED',
+    'Saga가 타임아웃 전에 종결 상태(PAID/FAILED/CANCELLED)로 끝남': () => finalStatus !== 'CREATED' && elapsed <= POLL_TIMEOUT_MS,
   });
 }
