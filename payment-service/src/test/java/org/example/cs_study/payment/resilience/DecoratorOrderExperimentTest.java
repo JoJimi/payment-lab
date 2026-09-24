@@ -112,8 +112,16 @@ class DecoratorOrderExperimentTest {
                         .failureRateThreshold(50)
                         .waitDurationInOpenState(Duration.ofSeconds(30))
                         .build());
+        // CallNotPermittedException은 재시도 대상에서 뺀다 — 서킷이 이미 열렸다는 뜻이라
+        // 재시도해봐야 또 즉시 거부될 뿐이다. 이걸 빼지 않으면 남은 재시도 예산(대기시간
+        // 포함)을 "이미 결론 난" 거부에 낭비하게 된다(CodeRabbit 리뷰, PR #85).
         Retry retry = Retry.of(
-                "mockPg-exp2", RetryConfig.custom().maxAttempts(3).waitDuration(Duration.ofMillis(1)).build());
+                "mockPg-exp2",
+                RetryConfig.custom()
+                        .maxAttempts(3)
+                        .waitDuration(Duration.ofMillis(1))
+                        .ignoreExceptions(CallNotPermittedException.class)
+                        .build());
 
         // Retry(바깥) → CircuitBreaker(안쪽) → 원본 호출. 로드맵 3.1이 권장하는 구성이다.
         Supplier<String> decorated =
@@ -150,11 +158,15 @@ class DecoratorOrderExperimentTest {
         ExecutorService executor = Executors.newCachedThreadPool();
         try {
             AtomicInteger attemptCount = new AtomicInteger();
-            Supplier<Future<String>> slowFutureSupplier = () -> executor.submit(() -> {
+            // 카운터는 태스크 바디가 아니라 제출 시점에 올린다 — Retry가 몇 번 "시도"했는지를
+            // 재는 것이지, 제출된 태스크가 실행을 시작했는지는 별개다(CodeRabbit 리뷰, PR #85).
+            Supplier<Future<String>> slowFutureSupplier = () -> {
                 attemptCount.incrementAndGet();
-                Thread.sleep(300);
-                return "OK";
-            });
+                return executor.submit(() -> {
+                    Thread.sleep(300);
+                    return "OK";
+                });
+            };
 
             TimeLimiter timeLimiter =
                     TimeLimiter.of("mockPg-exp3", TimeLimiterConfig.custom().timeoutDuration(Duration.ofMillis(50)).build());
