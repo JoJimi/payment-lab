@@ -18,11 +18,20 @@ spring:
 
   flyway:
     locations: classpath:db/migration
-    baseline-on-migrate: false
     # inventory-service와 물리 DB를 공유한다(README 방침, 2.2) — 기본 이력 테이블 이름을 그대로
     # 쓰면 서로 다른 두 앱의 마이그레이션 세트가 한 이력에 뒤섞여 체크섬 충돌이 난다. 별도
     # 이력 테이블로 이 앱의 버전 계보를 독립적으로 추적한다.
     table: flyway_schema_history_notification
+    # 이 서비스가 이 물리 DB에 처음 붙는 시점엔 inventory-service가 이미 자신의 테이블들을
+    # 만들어놓은 "비어있지 않은" public 스키마를 보게 된다. baseline-on-migrate=false(기본값)면
+    # Flyway가 "테이블은 있는데 내 이력 테이블(flyway_schema_history_notification)은 없다"를
+    # 위험 신호로 보고 거부한다(FlywayException: non-empty schema, no schema history table).
+    # baseline-version=0으로 베이스라인을 잡아야 V1부터 이 앱 자신의 마이그레이션이 전부 정상
+    # 실행된다(기본 baselineVersion=1이면 V1이 "이미 적용됨"으로 스킵되어 이 앱 자신의 테이블이
+    # 만들어지지 않는다). Testcontainers 기반 테스트는 항상 빈 스키마에서 시작해 이 경로를 타지
+    # 않으므로 지금까지 로컬 docker-compose 최초 기동에서만 드러났다.
+    baseline-on-migrate: true
+    baseline-version: 0
 
 server:
   port: 8084
