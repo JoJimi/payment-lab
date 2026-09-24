@@ -2,6 +2,8 @@ package org.example.cs_study.payment.client;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.github.resilience4j.bulkhead.ThreadPoolBulkheadConfig;
+import io.github.resilience4j.bulkhead.ThreadPoolBulkheadRegistry;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.github.resilience4j.core.IntervalFunction;
@@ -12,18 +14,28 @@ import io.github.resilience4j.timelimiter.TimeLimiterRegistry;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import org.example.cs_study.mockpg.MockPgServer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 /**
- * 3.2/3.3/3.4 — {@link ResilientMockPgGateway}가 Retry+CircuitBreaker+TimeLimiter를 3.1이
- * 결정한 순서(Retry 바깥 → CircuitBreaker → TimeLimiter 안쪽)로 실제로 올바르게 감싸는지
- * 증명한다. Spring 컨텍스트도 Docker도 필요 없다 — {@link MockPgServer}를 인프로세스로
- * 띄우고(1.5, {@code PaymentIdempotencyConcurrencyTest}와 같은 패턴), 순수 Resilience4j
- * core API로 CircuitBreaker/Retry/TimeLimiter를 직접 구성한다.
+ * 3.2/3.3/3.4/3.5 — {@link ResilientMockPgGateway}가 Retry+CircuitBreaker+TimeLimiter+Bulkhead를
+ * 3.1이 결정한 순서(Retry 바깥 → CircuitBreaker → TimeLimiter → Bulkhead 안쪽)로 실제로
+ * 올바르게 감싸는지 증명한다. Spring 컨텍스트도 Docker도 필요 없다 — {@link MockPgServer}를
+ * 인프로세스로 띄우고(1.5, {@code PaymentIdempotencyConcurrencyTest}와 같은 패턴), 순수
+ * Resilience4j core API로 CircuitBreaker/Retry/TimeLimiter/ThreadPoolBulkhead를 직접
+ * 구성한다.
  */
 class ResilientMockPgGatewayTest {
 
@@ -34,6 +46,13 @@ class ResilientMockPgGatewayTest {
     /** TimeLimiter 자체를 검증하는 테스트가 아니면 절대 먼저 끊기지 않을 만큼 넉넉한 제한. */
     private static final TimeLimiterConfig GENEROUS_TIME_LIMIT =
             TimeLimiterConfig.custom().timeoutDuration(Duration.ofSeconds(10)).build();
+
+    /** Bulkhead 자체를 검증하는 테스트가 아니면 절대 거부당하지 않을 만큼 넉넉한 용량. */
+    private static final ThreadPoolBulkheadConfig GENEROUS_BULKHEAD = ThreadPoolBulkheadConfig.custom()
+            .coreThreadPoolSize(10)
+            .maxThreadPoolSize(10)
+            .queueCapacity(50)
+            .build();
 
     private static MockPgServer mockPgServer;
     private static String baseUrl;
@@ -64,11 +83,21 @@ class ResilientMockPgGatewayTest {
 
     private ResilientMockPgGateway newGateway(
             CircuitBreakerConfig cbConfig, RetryConfig retryConfig, Duration readTimeout, TimeLimiterConfig tlConfig) {
+        return newGateway(cbConfig, retryConfig, readTimeout, tlConfig, GENEROUS_BULKHEAD);
+    }
+
+    private ResilientMockPgGateway newGateway(
+            CircuitBreakerConfig cbConfig,
+            RetryConfig retryConfig,
+            Duration readTimeout,
+            TimeLimiterConfig tlConfig,
+            ThreadPoolBulkheadConfig bulkheadConfig) {
         MockPgClient client = new MockPgClient(baseUrl, readTimeout);
         CircuitBreakerRegistry cbRegistry = CircuitBreakerRegistry.of(cbConfig);
         RetryRegistry retryRegistry = RetryRegistry.of(retryConfig);
         TimeLimiterRegistry tlRegistry = TimeLimiterRegistry.of(tlConfig);
-        return new ResilientMockPgGateway(client, cbRegistry, retryRegistry, tlRegistry);
+        ThreadPoolBulkheadRegistry bulkheadRegistry = ThreadPoolBulkheadRegistry.of(bulkheadConfig);
+        return new ResilientMockPgGateway(client, cbRegistry, retryRegistry, tlRegistry, bulkheadRegistry);
     }
 
     @Test
@@ -259,6 +288,55 @@ class ResilientMockPgGatewayTest {
         // TimeLimiter가 배선되지 않아 클라이언트의 5초 소켓 타임아웃이나 PG의 1초 처리
         // 완료를 기다렸다면 1000ms를 훌쩍 넘겼을 것이다.
         assertThat(elapsedMs).isLessThan(1000L);
+    }
+
+    @Test
+    void 동시_PG_호출이_스레드풀_용량을_넘으면_초과분은_BulkheadFullException으로_즉시_거부된다() throws Exception {
+        // PG 응답을 300ms 지연시킨다(정상 처리, forceTimeout 아님) — "처리 중"인 상태를
+        // 인위적으로 오래 유지해 동시 요청이 겹치게 만든다. core=1/max=1/queueCapacity=1이면
+        // 동시에 받아줄 수 있는 요청은 딱 2건(실행 중 1 + 대기 1)뿐이다. 3번째가 동시에
+        // 들어오면 스레드/큐 어디에도 못 들어가고 그 자리에서 BulkheadFullException으로
+        // 거부된다(NO_RETRY라 재시도로 구제되지도 않는다).
+        configureMockPg(300, 0.0, null, false);
+        ThreadPoolBulkheadConfig tightBulkhead = ThreadPoolBulkheadConfig.custom()
+                .coreThreadPoolSize(1)
+                .maxThreadPoolSize(1)
+                .queueCapacity(1)
+                .build();
+        CircuitBreakerConfig cbConfig = CircuitBreakerConfig.custom()
+                .slidingWindowSize(10)
+                .minimumNumberOfCalls(10)
+                .failureRateThreshold(50)
+                .waitDurationInOpenState(Duration.ofSeconds(30))
+                .build();
+        ResilientMockPgGateway gateway =
+                newGateway(cbConfig, NO_RETRY, Duration.ofSeconds(5), GENEROUS_TIME_LIMIT, tightBulkhead);
+
+        int concurrentRequests = 3;
+        CountDownLatch startLatch = new CountDownLatch(1);
+        ExecutorService callers = Executors.newFixedThreadPool(concurrentRequests);
+        try {
+            List<Future<MockPgResult>> futures = IntStream.range(0, concurrentRequests)
+                    .mapToObj(i -> callers.submit(() -> {
+                        startLatch.await();
+                        return gateway.requestPayment(
+                                UUID.randomUUID().toString(), new BigDecimal("1000.0000"), "KRW");
+                    }))
+                    .collect(Collectors.toList());
+            startLatch.countDown();
+
+            List<MockPgOutcome> outcomes = new ArrayList<>();
+            for (Future<MockPgResult> future : futures) {
+                outcomes.add(future.get(5, TimeUnit.SECONDS).outcome());
+            }
+
+            // 용량(2)을 넘는 1건만 거부되고, 나머지 2건은 (하나는 즉시, 하나는 큐에서 잠깐
+            // 기다렸다가) 정상적으로 PG까지 도달해 승인된다.
+            assertThat(outcomes)
+                    .containsExactlyInAnyOrder(MockPgOutcome.APPROVED, MockPgOutcome.APPROVED, MockPgOutcome.TIMEOUT);
+        } finally {
+            callers.shutdownNow();
+        }
     }
 
     private static CircuitBreakerConfig defaultConfig() {

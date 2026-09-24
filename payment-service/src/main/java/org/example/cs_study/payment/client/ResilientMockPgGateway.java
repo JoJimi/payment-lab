@@ -1,5 +1,8 @@
 package org.example.cs_study.payment.client;
 
+import io.github.resilience4j.bulkhead.BulkheadFullException;
+import io.github.resilience4j.bulkhead.ThreadPoolBulkhead;
+import io.github.resilience4j.bulkhead.ThreadPoolBulkheadRegistry;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
@@ -8,16 +11,14 @@ import io.github.resilience4j.retry.RetryConfig;
 import io.github.resilience4j.retry.RetryRegistry;
 import io.github.resilience4j.timelimiter.TimeLimiter;
 import io.github.resilience4j.timelimiter.TimeLimiterRegistry;
-import jakarta.annotation.PreDestroy;
 import java.math.BigDecimal;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeoutException;
 import org.springframework.stereotype.Component;
 
 /**
- * {@link MockPgClient}를 Retry+CircuitBreaker로 감싼 façade(3.2, 3.3). {@code PaymentService}는
+ * {@link MockPgClient}를 Retry+CircuitBreaker+TimeLimiter+Bulkhead로 감싼 façade(3.2~3.5).
+ * {@code PaymentService}는
  * 이 클래스를 통해서만 Mock PG를 호출한다 — {@link MockPgClient}를 직접 호출하면
  * 이 보호 없이 매번 원본 호출로 새는 실수를 막는다.
  *
@@ -50,17 +51,27 @@ import org.springframework.stereotype.Component;
  * CircuitBreaker → TimeLimiter 안쪽)대로 원본 호출에 가장 밀착시킨다 — 그래야 재시도
  * 한 번 한 번이 독립적인 시간 예산을 받는다(3.1 실험 3). {@code MockPgClient.requestPayment}는
  * 동기(blocking) 호출이라, {@code TimeLimiter.decorateFutureSupplier}가 요구하는
- * {@code Future} 계약을 만족시키려면 별도 스레드에 맡겨야 한다 — 이 클래스가 소유한
- * {@link #executor}가 그 자리다. 다만 이 스레드풀은 아직 진짜 "격리"가 아니다(무제한
- * {@code newCachedThreadPool}) — PG 호출 전용으로 크기를 제한하고 거부 정책을 두는 것은
- * 3.5(Bulkhead)의 몫이다. {@code TimeLimiter}가 시간 초과로 포기해도({@code cancelRunningFuture}
- * 기본값 true) blocking HTTP 클라이언트는 인터럽트에 응답하지 않아 소켓은 계속 붙들려
- * 있을 수 있다 — {@link MockPgClient}의 읽기 타임아웃을 TimeLimiter와 같은 값으로 맞춰 그
- * "붙들림"의 상한을 최소한 비슷하게 묶어뒀다.
+ * {@code Future} 계약을 만족시키려면 별도 스레드에 맡겨야 한다. {@code TimeLimiter}가 시간
+ * 초과로 포기해도({@code cancelRunningFuture} 기본값 true) blocking HTTP 클라이언트는
+ * 인터럽트에 응답하지 않아 소켓은 계속 붙들려 있을 수 있다 — {@link MockPgClient}의 읽기
+ * 타임아웃을 TimeLimiter와 같은 값으로 맞춰 그 "붙들림"의 상한을 최소한 비슷하게 묶어뒀다.
  *
  * <p>{@code TimeLimiter}의 {@link TimeoutException}도 {@link MockPgUnavailableException}과
  * 같은 취급을 받는다 — PG가 시간 안에 응답하지 못했다는 것도 "승인/거절을 확정할 수 없다"는
  * 뜻이라 재시도 대상이고(서킷 상태 확인 포함), 최종적으로도 UNKNOWN(timedOut)으로 번역된다.
+ *
+ * <p><b>3.5 — Bulkhead로 그 별도 스레드를 실제로 격리한다</b>: 3.4는 {@code TimeLimiter}가
+ * 요구하는 {@code Future}를 만들려고 무제한 {@code newCachedThreadPool}을 직접 관리했다 —
+ * PG가 느려지면 이 풀이 한도 없이 스레드를 늘려가며 다른 작업의 자원(CPU, 메모리)을 잠식할
+ * 수 있는 상태였다. {@link #threadPoolBulkhead}(스레드풀 크기/큐 용량을 YAML로 제한하는
+ * {@code ThreadPoolBulkhead})가 그 수작업 executor를 대체한다 — {@code submit}이 core/max
+ * 스레드와 큐를 모두 채우면 새 작업을 스레드/큐에 넣지 않고 그 자리에서
+ * {@link BulkheadFullException}을 던진다. 이 예외도 {@link MockPgUnavailableException}과
+ * 같은 취급(재시도 대상, 서킷 상태 확인, 최종 UNKNOWN)을 받는다 — PG 자체는 멀쩡해도 우리
+ * 쪽 처리 능력이 바닥났다는 뜻이라 "승인/거절을 확정할 수 없다"는 점은 동일하기 때문이다.
+ * 다만 이 격리는 동시 처리량의 상한일 뿐, 3.4가 남긴 "blocking 클라이언트가 인터럽트에
+ * 응답하지 않는다"는 한계 자체를 없애지는 못한다 — 거부된 요청이 줄어들 뿐, 이미 실행 중인
+ * 스레드가 타임아웃 이후에도 소켓을 붙들고 있을 수 있다는 사실은 그대로다.
  */
 @Component
 public class ResilientMockPgGateway {
@@ -69,16 +80,18 @@ public class ResilientMockPgGateway {
     private final CircuitBreaker circuitBreaker;
     private final Retry retry;
     private final TimeLimiter timeLimiter;
-    private final ExecutorService executor = Executors.newCachedThreadPool();
+    private final ThreadPoolBulkhead threadPoolBulkhead;
 
     public ResilientMockPgGateway(
             MockPgClient mockPgClient,
             CircuitBreakerRegistry circuitBreakerRegistry,
             RetryRegistry retryRegistry,
-            TimeLimiterRegistry timeLimiterRegistry) {
+            TimeLimiterRegistry timeLimiterRegistry,
+            ThreadPoolBulkheadRegistry threadPoolBulkheadRegistry) {
         this.mockPgClient = mockPgClient;
         this.circuitBreaker = circuitBreakerRegistry.circuitBreaker("mockPg");
         this.timeLimiter = timeLimiterRegistry.timeLimiter("mockPg");
+        this.threadPoolBulkhead = threadPoolBulkheadRegistry.bulkhead("mockPg");
         // application.yml의 retry-exceptions만으로는 부족하다(CodeRabbit 리뷰, PR #87) — 서킷을
         // 실제로 OPEN시킨 그 실패도 MockPgUnavailableException이라 재시도 대상으로 잡혀, 다음
         // 시도 전에 백오프를 한 번 더 기다린 뒤에야(그 시도에서 CallNotPermittedException을
@@ -93,7 +106,9 @@ public class ResilientMockPgGateway {
         // 무력화된다.
         RetryConfig config = RetryConfig.from(retryRegistry.retry("mockPg").getRetryConfig())
                 .retryExceptions()
-                .retryOnException(t -> (t instanceof MockPgUnavailableException || t instanceof TimeoutException)
+                .retryOnException(t -> (t instanceof MockPgUnavailableException
+                                || t instanceof TimeoutException
+                                || t instanceof BulkheadFullException)
                         && circuitBreaker.getState() != CircuitBreaker.State.OPEN)
                 .build();
         this.retry = retryRegistry.retry("mockPg-gateway", () -> config);
@@ -102,23 +117,19 @@ public class ResilientMockPgGateway {
     public MockPgResult requestPayment(String idempotencyKey, BigDecimal amount, String currency) {
         Callable<MockPgResult> withTimeLimiter = TimeLimiter.decorateFutureSupplier(
                 timeLimiter,
-                () -> executor.submit(() -> mockPgClient.requestPayment(idempotencyKey, amount, currency)));
+                () -> threadPoolBulkhead
+                        .submit(() -> mockPgClient.requestPayment(idempotencyKey, amount, currency))
+                        .toCompletableFuture());
         Callable<MockPgResult> withCircuitBreaker = CircuitBreaker.decorateCallable(circuitBreaker, withTimeLimiter);
         Callable<MockPgResult> withRetry = Retry.decorateCallable(retry, withCircuitBreaker);
         try {
             return withRetry.call();
-        } catch (MockPgUnavailableException | CallNotPermittedException | TimeoutException e) {
+        } catch (MockPgUnavailableException | CallNotPermittedException | TimeoutException | BulkheadFullException e) {
             return MockPgResult.timedOut();
         } catch (Exception e) {
-            // Callable 계약상 checked Exception이 선언돼 있을 뿐, 위 세 타입 외에는 원래
+            // Callable 계약상 checked Exception이 선언돼 있을 뿐, 위 네 타입 외에는 원래
             // 나올 일이 없다 — 나오면 우리가 모르는 새로운 실패 모드이므로 조용히 삼키지 않는다.
             throw new IllegalStateException("Mock PG 호출 중 예상하지 못한 예외", e);
         }
-    }
-
-    /** 스프링 컨텍스트 종료 시 스레드가 새지 않도록 정리한다. */
-    @PreDestroy
-    void shutdown() {
-        executor.shutdownNow();
     }
 }

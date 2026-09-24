@@ -209,3 +209,48 @@ mockPgClient.requestPayment(...))`)가 그 역할을 한다.
 
 **아직 손대지 않은 것**: PG 호출 전용 스레드풀의 크기 제한과 거부 정책, 그리고 그
 스레드풀이 다른 작업과 자원을 다투지 않도록 격리하는 것은 3.5(Bulkhead)에서 이어간다.
+
+### 5. Bulkhead 배선 — 무제한 스레드풀을 제한된 크기로 격리한다 (3.5)
+
+**배경**: 3.4는 `TimeLimiter`가 요구하는 `Future`를 만들려고 `ResilientMockPgGateway`가
+직접 관리하는 `Executors.newCachedThreadPool()`을 썼다. 3.4 문서에 이미 적어뒀듯 이건
+"임시 조치"였다 — PG가 느려지면 이 풀은 한도 없이 스레드를 늘려가며 다른 작업의 CPU/메모리를
+잠식할 수 있는 상태였다. 3.1이 정한 순서(Retry → CircuitBreaker → TimeLimiter → Bulkhead)의
+마지막 조각을 채운다.
+
+**결정**: 수작업 `ExecutorService`를 Resilience4j의 `ThreadPoolBulkhead`로 교체했다 —
+`resilience4j.thread-pool-bulkhead.instances.mockPg`(`core-thread-pool-size: 4`,
+`max-thread-pool-size: 8`, `queue-capacity: 8`)로 크기를 명시적으로 제한한다. core/max
+스레드와 큐가 모두 찬 상태에서 새 요청이 오면 `ThreadPoolBulkhead.submit`이 스레드도 큐도
+쓰지 않고 그 자리에서 `BulkheadFullException`을 던진다(동기적으로 — 내부적으로
+`RejectedExecutionException`을 잡아 변환한다는 것을 `FixedThreadPoolBulkhead` 바이트코드로
+확인했다). 이 예외도 `MockPgUnavailableException`/`TimeoutException`과 동일하게 취급한다 —
+재시도 대상(서킷 상태 확인 포함, 3.3)이고 최종적으로 `MockPgResult.timedOut()`(UNKNOWN)으로
+번역된다. PG 자체는 멀쩡해도 우리 쪽 처리 능력이 바닥났다는 것 역시 "승인/거절을 확정할 수
+없다"는 뜻이기 때문이다.
+
+**함정 — `ThreadPoolBulkhead.decorateCallable`은 쓸 수 없었다**: 처음엔 다른 데코레이터들과
+통일된 스타일로 `ThreadPoolBulkhead.decorateCallable(bulkhead, callable)`을 쓰려 했다.
+그런데 이 정적 메서드는 `Supplier<CompletionStage<T>>`를 반환한다 — `TimeLimiter`가
+요구하는 `Supplier<Future<T>>`와 호환되지 않는다(`CompletionStage`는 `Future`를 확장하지
+않는다). 대신 인터페이스에 있는 인스턴스 메서드 `threadPoolBulkhead.submit(Callable<T>)`를
+직접 쓰고 그 반환값(선언 타입은 `CompletionStage<T>`이지만 실제로는 `CompletableFuture`)에
+`.toCompletableFuture()`를 호출해 `Future<T>` 계약을 만족시켰다. `javap`으로
+`ThreadPoolBulkhead` 인터페이스와 그 구현체(`FixedThreadPoolBulkhead`)의 바이트코드를 직접
+비교하고 나서야 이 차이를 확인했다 — 구현체에는 `CompletableFuture`를 직접 반환하는
+오버로드도 있지만, 인터페이스 타입으로 참조하는 한 그 오버로드는 보이지 않는다.
+
+**증명 — 동시 PG 호출이 스레드풀 용량을 넘으면 초과분은 BulkheadFullException으로 즉시
+거부된다**: `coreThreadPoolSize=1`, `maxThreadPoolSize=1`, `queueCapacity=1`로 좁혀
+동시에 받아줄 수 있는 요청을 딱 2건(실행 중 1 + 대기 1)으로 제한했다. PG 응답을 300ms
+지연시키고(정상 처리, 장애 아님) `CountDownLatch`로 3개의 요청을 동시에 쏜 뒤 결과를
+모았다 — 2건은 APPROVED(하나는 즉시 실행, 하나는 큐에서 잠깐 기다렸다가 실행), 1건은
+TIMEOUT(BulkheadFullException으로 즉시 거부)이었다. 5회 반복 실행으로 타이밍에 따른
+플레이키니스가 없음을 확인했다.
+
+**한계 — 여전히 남은 것**: Bulkhead는 "동시에 몇 건까지 받아줄지"의 상한일 뿐, 3.4가 남긴
+근본적인 한계(blocking HTTP 클라이언트가 인터럽트에 응답하지 않아 타임아웃 이후에도 소켓을
+붙들고 있을 수 있다는 것) 자체를 없애지는 못한다. 다만 이제 그 "붙들려 있는" 스레드의
+개수에 확실한 상한이 생겼다는 점이 3.4와의 차이다 — 전에는 무제한으로 늘어날 수 있었다.
+Fallback 설계(서킷이 OPEN이거나 Bulkhead가 가득 찼을 때 무엇을 돌려줄지)는 3.6에서
+이어간다.

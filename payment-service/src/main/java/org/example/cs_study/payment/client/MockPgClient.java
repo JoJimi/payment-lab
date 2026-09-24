@@ -17,7 +17,9 @@ import org.springframework.web.client.RestClient;
  * 시간이 지나면 논리적으로 포기하고 {@code Future}를 취소하는데, 이 클래스가 쓰는 blocking
  * HTTP 클라이언트는 인터럽트에 응답하지 않아 실제 소켓은 더 오래 붙들려 있을 수 있다 — 그
  * "더 오래"의 상한을 TimeLimiter의 논리적 타임아웃과 맞춰, 최소한 둘이 크게 어긋나지 않게
- * 한다. 스레드가 실제로 격리되지 않은 채 남아있는 문제 자체는 3.5(Bulkhead)의 몫이다.
+ * 한다. 그 스레드가 속한 풀 자체를 무제한에서 제한된 크기로 격리하는 것은 3.5(Bulkhead)에서
+ * 다룬다 — 다만 격리가 동시 처리량의 상한을 두는 것이지, 인터럽트에 응답하지 않는 blocking
+ * 클라이언트의 이 근본적인 한계 자체를 없애지는 못한다.
  *
  * <p><b>3.2:</b> PG가 승인/거절을 확정하지 못하는 상황(5xx, 타임아웃, 파싱 불가)은
  * {@link MockPgResult#timedOut()}을 반환하는 대신 {@link MockPgUnavailableException}을
