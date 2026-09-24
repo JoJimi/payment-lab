@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import io.github.resilience4j.core.IntervalFunction;
+import io.github.resilience4j.retry.RetryConfig;
+import io.github.resilience4j.retry.RetryRegistry;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.time.Duration;
@@ -14,12 +17,17 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 /**
- * 3.2 — {@link ResilientMockPgGateway}가 CircuitBreaker를 실제로 올바르게 감싸는지
- * 증명한다. Spring 컨텍스트도 Docker도 필요 없다 — {@link MockPgServer}를 인프로세스로
- * 띄우고(1.5, {@code PaymentIdempotencyConcurrencyTest}와 같은 패턴), 순수 Resilience4j
- * core API로 CircuitBreaker를 직접 구성한다.
+ * 3.2/3.3 — {@link ResilientMockPgGateway}가 Retry+CircuitBreaker를 3.1이 결정한 순서
+ * (Retry 바깥 → CircuitBreaker 안쪽)로 실제로 올바르게 감싸는지 증명한다. Spring 컨텍스트도
+ * Docker도 필요 없다 — {@link MockPgServer}를 인프로세스로 띄우고(1.5,
+ * {@code PaymentIdempotencyConcurrencyTest}와 같은 패턴), 순수 Resilience4j core API로
+ * CircuitBreaker/Retry를 직접 구성한다.
  */
 class ResilientMockPgGatewayTest {
+
+    /** CircuitBreaker 동작만 보는 테스트에서 Retry 변수를 없애기 위한 사실상 무재시도 설정. */
+    private static final RetryConfig NO_RETRY =
+            RetryConfig.custom().maxAttempts(1).build();
 
     private static MockPgServer mockPgServer;
     private static String baseUrl;
@@ -36,10 +44,19 @@ class ResilientMockPgGatewayTest {
         mockPgServer.stop();
     }
 
-    private ResilientMockPgGateway newGateway(CircuitBreakerConfig config) {
-        MockPgClient client = new MockPgClient(baseUrl);
-        CircuitBreakerRegistry registry = CircuitBreakerRegistry.of(config);
-        return new ResilientMockPgGateway(client, registry);
+    private ResilientMockPgGateway newGateway(CircuitBreakerConfig cbConfig) {
+        return newGateway(cbConfig, NO_RETRY, Duration.ofSeconds(5));
+    }
+
+    private ResilientMockPgGateway newGateway(CircuitBreakerConfig cbConfig, RetryConfig retryConfig) {
+        return newGateway(cbConfig, retryConfig, Duration.ofSeconds(5));
+    }
+
+    private ResilientMockPgGateway newGateway(CircuitBreakerConfig cbConfig, RetryConfig retryConfig, Duration readTimeout) {
+        MockPgClient client = new MockPgClient(baseUrl, readTimeout);
+        CircuitBreakerRegistry cbRegistry = CircuitBreakerRegistry.of(cbConfig);
+        RetryRegistry retryRegistry = RetryRegistry.of(retryConfig);
+        return new ResilientMockPgGateway(client, cbRegistry, retryRegistry);
     }
 
     @Test
@@ -103,6 +120,103 @@ class ResilientMockPgGatewayTest {
         // 원본 호출까지 갔다면 5000ms 근처가 나온다 — CallNotPermittedException으로
         // 즉시 끝났다면 수 ms 안에 반환된다. 500ms를 기준으로 삼아도 충분히 구분된다.
         assertThat(elapsedMs).isLessThan(500);
+    }
+
+    @Test
+    void 지속적인_PG_불능이면_지수_백오프로_재시도하다_결국_UNKNOWN으로_포기한다() throws IOException {
+        // 클라이언트 읽기 타임아웃을 100ms로 짧게 줘서(3.4 이전이라 MockPgClient 자체
+        // 타임아웃이 없으므로 이 생성자로 대체) 테스트가 5s x 3회를 기다리지 않게 한다.
+        configureMockPg(0, 0.0, null, true);
+        RetryConfig retryConfig = RetryConfig.custom()
+                .maxAttempts(3)
+                .intervalFunction(IntervalFunction.ofExponentialBackoff(Duration.ofMillis(200), 2.0))
+                .retryExceptions(MockPgUnavailableException.class)
+                .build();
+        // 3번의 시도 안에는 서킷이 절대 열리지 않도록 CB 임계치를 넉넉히 잡아, 이 테스트가
+        // 순수하게 Retry의 지수 백오프만 관찰하게 한다(서킷 개입은 별도 테스트에서 다룬다).
+        CircuitBreakerConfig cbConfig = CircuitBreakerConfig.custom()
+                .slidingWindowSize(10)
+                .minimumNumberOfCalls(10)
+                .failureRateThreshold(50)
+                .waitDurationInOpenState(Duration.ofSeconds(30))
+                .build();
+        ResilientMockPgGateway gateway = newGateway(cbConfig, retryConfig, Duration.ofMillis(100));
+
+        long start = System.nanoTime();
+        MockPgResult result =
+                gateway.requestPayment(UUID.randomUUID().toString(), new BigDecimal("1000.0000"), "KRW");
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+
+        assertThat(result.outcome()).isEqualTo(MockPgOutcome.TIMEOUT);
+        // 시도 3회(각 ~100ms) + 지수 백오프 2회(200ms, 400ms) = 900ms 근처. 스케줄링 변동을
+        // 감안해 700ms 이상이면 백오프가 실제로 두 번 걸렸다고 볼 수 있다.
+        assertThat(elapsedMs).isBetween(700L, 5000L);
+    }
+
+    @Test
+    void 서킷을_연_실패_뒤에는_백오프_없이_그_자리에서_재시도를_멈춘다() throws IOException {
+        configureMockPg(0, 0.0, null, true);
+        // maxAttempts를 넉넉히(5) 줘서 "서킷 상태를 안 봤다면 더 재시도했을 상황"을 만든다 —
+        // ResilientMockPgGateway는 이 retryConfig의 backoff/maxAttempts는 그대로 쓰지만,
+        // 예외 프레디케이트는 생성자에서 서킷 상태를 확인하도록 자체적으로 덮어쓴다.
+        RetryConfig retryConfig = RetryConfig.custom()
+                .maxAttempts(5)
+                .intervalFunction(IntervalFunction.ofExponentialBackoff(Duration.ofMillis(150), 2.0))
+                .retryExceptions(MockPgUnavailableException.class)
+                .build();
+        // 2번 만에 슬라이딩 윈도우가 차서 서킷이 열리도록 임계치를 낮게 잡는다(3.1 실험 2와 동일).
+        CircuitBreakerConfig cbConfig = CircuitBreakerConfig.custom()
+                .slidingWindowSize(2)
+                .minimumNumberOfCalls(2)
+                .failureRateThreshold(50)
+                .waitDurationInOpenState(Duration.ofSeconds(30))
+                .build();
+        ResilientMockPgGateway gateway = newGateway(cbConfig, retryConfig, Duration.ofMillis(100));
+
+        long start = System.nanoTime();
+        MockPgResult result =
+                gateway.requestPayment(UUID.randomUUID().toString(), new BigDecimal("1000.0000"), "KRW");
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+
+        assertThat(result.outcome()).isEqualTo(MockPgOutcome.TIMEOUT);
+        // 실제 흐름: 시도1(~100ms, 실패 1/2, 서킷 아직 CLOSED) -> 백오프 150ms -> 시도2(~100ms,
+        // 실패 2/2 — 이 실패 자체가 서킷을 OPEN으로 만든다) -> 프레디케이트가 그 자리에서
+        // "서킷이 이미 OPEN"임을 확인하고 3번째 시도(와 그 앞의 백오프 300ms)를 아예 시작하지
+        // 않는다. maxAttempts=5를 줬어도 실제로는 딱 2번만 시도된다 — 합쳐서 350ms 안팎이어야
+        // 한다. 서킷 상태를 보지 않았다면(수정 전) 3번째 시도까지 가면서(원본 호출은 안 가더라도
+        // CallNotPermittedException을 받기 전에 300ms 백오프를 한 번 더 날려 650ms를 넘겼다.
+        assertThat(elapsedMs).isBetween(200L, 600L);
+    }
+
+    @Test
+    void 같은_idempotencyKey로_재시도해도_PG는_한_번만_처리하고_같은_결과를_재현한다() throws IOException {
+        // delayMs(300ms) > 클라이언트 읽기 타임아웃(100ms): 첫 시도는 반드시 클라이언트
+        // 타임아웃으로 실패한다. 하지만 서버 쪽 처리는 취소되지 않고 백그라운드에서 계속
+        // 진행된다(1.6 멱등성 캐시) — 백오프(250ms) 뒤의 두 번째 시도가 도착할 때(300ms
+        // 경과 시점 이후)는 이미 완료된 결과를 즉시 재현받는다.
+        //
+        // 만약 재시도마다 idempotencyKey를 새로 생성하는 버그가 있었다면, 매 시도가 처음부터
+        // 300ms 지연을 다시 겪어 결국 3번 다 타임아웃으로 소진돼 TIMEOUT이 됐을 것이다 —
+        // 여기서 APPROVED가 나온다는 사실 자체가 재시도 전체에서 같은 키를 재사용한다는
+        // 증거다.
+        configureMockPg(300, 0.0, null, false);
+        RetryConfig retryConfig = RetryConfig.custom()
+                .maxAttempts(3)
+                .waitDuration(Duration.ofMillis(250))
+                .retryExceptions(MockPgUnavailableException.class)
+                .build();
+        CircuitBreakerConfig cbConfig = CircuitBreakerConfig.custom()
+                .slidingWindowSize(10)
+                .minimumNumberOfCalls(10)
+                .failureRateThreshold(50)
+                .waitDurationInOpenState(Duration.ofSeconds(30))
+                .build();
+        ResilientMockPgGateway gateway = newGateway(cbConfig, retryConfig, Duration.ofMillis(100));
+
+        MockPgResult result =
+                gateway.requestPayment(UUID.randomUUID().toString(), new BigDecimal("1000.0000"), "KRW");
+
+        assertThat(result.outcome()).isEqualTo(MockPgOutcome.APPROVED);
     }
 
     private static CircuitBreakerConfig defaultConfig() {

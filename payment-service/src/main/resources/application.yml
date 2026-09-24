@@ -72,6 +72,18 @@ resilience4j:
       mockPg:
         max-attempts: 3
         wait-duration: 500ms
+        # 지수 백오프: 500ms -> 1000ms. 여러 인스턴스가 동시에 장애를 겪어도 재시도가
+        # 한 타이밍에 몰려 부하를 더 키우지 않도록 매 대기시간에 ±50% 무작위 지터를 얹는다.
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        enable-randomized-wait: true
+        randomized-wait-factor: 0.5
+        # 카드 거절 등 정상 비즈니스 실패는 예외 없이 정상 반환되므로 애초에 재시도 대상이
+        # 아니다(3.2). 기술적 실패(MockPgUnavailableException)만 재시도하고, 서킷이 이미
+        # 열려 원본 호출조차 못 간 CallNotPermittedException은 재시도해도 똑같이 거부될
+        # 뿐이라 재시도 목록에서 뺀다 — 3.1 실험 2가 증명한 것과 같은 이유다.
+        retry-exceptions:
+          - org.example.cs_study.payment.client.MockPgUnavailableException
 
   timelimiter:
     instances:

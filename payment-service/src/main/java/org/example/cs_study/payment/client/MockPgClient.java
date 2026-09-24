@@ -2,6 +2,7 @@ package org.example.cs_study.payment.client;
 
 import java.math.BigDecimal;
 import java.time.Duration;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
@@ -27,10 +28,18 @@ public class MockPgClient {
 
     private final RestClient restClient;
 
+    // 생성자가 둘이라 Spring이 어느 쪽으로 주입할지 스스로 못 고른다 — @Autowired로 명시하지
+    // 않으면 "No default constructor found"로 빈 생성 자체가 실패한다(CI에서 실제로 겪음).
+    @Autowired
     public MockPgClient(@Value("${mockpg.base-url:http://localhost:8090}") String baseUrl) {
+        this(baseUrl, Duration.ofSeconds(5));
+    }
+
+    /** 테스트 전용 — Retry/TimeLimiter 검증에서 5s 기본값 대신 짧은 읽기 타임아웃을 주입한다. */
+    MockPgClient(String baseUrl, Duration readTimeout) {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(Duration.ofSeconds(2));
-        factory.setReadTimeout(Duration.ofSeconds(5));
+        factory.setReadTimeout(readTimeout);
         this.restClient = RestClient.builder().baseUrl(baseUrl).requestFactory(factory).build();
     }
 
