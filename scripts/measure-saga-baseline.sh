@@ -44,8 +44,23 @@ wait_for_app_ready "${INVENTORY_SERVICE_URL}/actuator/health"
 
 # inventory 테이블은 이제 postgres-inventory(2.2, 5434 포트) 안에 있다 — 1단계의 단일
 # payment-lab-postgres 컨테이너가 아니다.
-docker exec payment-lab-postgres-inventory psql -U "${DB_USERNAME:?DB_USERNAME이 필요합니다 — .env를 source 하세요}" -d payment_lab_inventory -c \
-  "UPDATE inventory SET available = ${STOCK}, reserved = 0 WHERE product_id = ${PRODUCT_ID};"
+#
+# CodeRabbit 리뷰(PR #82) — 마이그레이션(V1~V5)은 products/inventory 테이블만 만들 뿐
+# PRODUCT_ID=1 행을 시드하지 않는다. 신선한 DB에서 그냥 UPDATE만 실행하면 0건 갱신된 채
+# 조용히 다음 단계로 넘어가고, 이후 k6가 존재하지 않는 재고를 예약하려다 실패하면서
+# 측정치 전체가 무효가 된다. RETURNING으로 실제 갱신 행을 확인해 없으면 즉시 종료한다.
+updated_product_id="$(
+  docker exec payment-lab-postgres-inventory psql \
+    -U "${DB_USERNAME:?DB_USERNAME이 필요합니다 — .env를 source 하세요}" \
+    -d payment_lab_inventory -v ON_ERROR_STOP=1 -Atq -c \
+    "UPDATE inventory SET available = ${STOCK}, reserved = 0
+     WHERE product_id = ${PRODUCT_ID}
+     RETURNING product_id;"
+)"
+if [[ "${updated_product_id}" != "${PRODUCT_ID}" ]]; then
+  echo "inventory 행이 없습니다: product_id=${PRODUCT_ID} (products/inventory에 먼저 상품을 등록하세요)" >&2
+  exit 1
+fi
 
 # CodeRabbit 리뷰(PR #82) — bootRun 직후 바로 워밍업을 쏘면 order-service가 아직 안 떠서
 # 연결 실패가 난다. saga-order-flow.js의 order_success_rate threshold가 rate==1(무관용)로
