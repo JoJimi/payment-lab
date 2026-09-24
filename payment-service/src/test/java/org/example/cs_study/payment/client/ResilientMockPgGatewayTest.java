@@ -154,9 +154,11 @@ class ResilientMockPgGatewayTest {
     }
 
     @Test
-    void 재시도_도중_서킷이_열리면_남은_재시도는_즉시_실패로_끝나_백오프를_낭비하지_않는다() throws IOException {
+    void 서킷을_연_실패_뒤에는_백오프_없이_그_자리에서_재시도를_멈춘다() throws IOException {
         configureMockPg(0, 0.0, null, true);
-        // maxAttempts를 넉넉히(5) 줘서 "서킷이 안 열렸다면 더 재시도했을 상황"을 만든다.
+        // maxAttempts를 넉넉히(5) 줘서 "서킷 상태를 안 봤다면 더 재시도했을 상황"을 만든다 —
+        // ResilientMockPgGateway는 이 retryConfig의 backoff/maxAttempts는 그대로 쓰지만,
+        // 예외 프레디케이트는 생성자에서 서킷 상태를 확인하도록 자체적으로 덮어쓴다.
         RetryConfig retryConfig = RetryConfig.custom()
                 .maxAttempts(5)
                 .intervalFunction(IntervalFunction.ofExponentialBackoff(Duration.ofMillis(150), 2.0))
@@ -177,12 +179,13 @@ class ResilientMockPgGatewayTest {
         long elapsedMs = (System.nanoTime() - start) / 1_000_000;
 
         assertThat(result.outcome()).isEqualTo(MockPgOutcome.TIMEOUT);
-        // 실제 흐름: 시도1(~100ms, 실패 1/2) -> 백오프 150ms -> 시도2(~100ms, 실패 2/2, 서킷
-        // OPEN) -> 백오프 300ms -> 시도3은 CallNotPermittedException으로 즉시 끝난다(원본
-        // 호출 없음, retryExceptions에 없어 재시도도 안 함). 합쳐서 650ms 안팎이어야 한다 —
-        // 만약 CallNotPermittedException도 재시도됐다면 백오프 600ms+1200ms가 더 붙어
-        // 2400ms를 넘겼을 것이다.
-        assertThat(elapsedMs).isBetween(400L, 1500L);
+        // 실제 흐름: 시도1(~100ms, 실패 1/2, 서킷 아직 CLOSED) -> 백오프 150ms -> 시도2(~100ms,
+        // 실패 2/2 — 이 실패 자체가 서킷을 OPEN으로 만든다) -> 프레디케이트가 그 자리에서
+        // "서킷이 이미 OPEN"임을 확인하고 3번째 시도(와 그 앞의 백오프 300ms)를 아예 시작하지
+        // 않는다. maxAttempts=5를 줬어도 실제로는 딱 2번만 시도된다 — 합쳐서 350ms 안팎이어야
+        // 한다. 서킷 상태를 보지 않았다면(수정 전) 3번째 시도까지 가면서(원본 호출은 안 가더라도
+        // CallNotPermittedException을 받기 전에 300ms 백오프를 한 번 더 날려 650ms를 넘겼다.
+        assertThat(elapsedMs).isBetween(200L, 600L);
     }
 
     @Test
