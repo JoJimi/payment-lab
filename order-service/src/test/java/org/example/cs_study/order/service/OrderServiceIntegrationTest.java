@@ -73,6 +73,7 @@ class OrderServiceIntegrationTest {
         OrderResponse response = orderService.createOrder(request);
 
         assertThat(response.status()).isEqualTo(OrderStatus.CREATED);
+        assertThat(response.sagaStatus()).isEqualTo(SagaStatus.STARTED);
         assertThat(response.totalAmount()).isEqualByComparingTo("10000.0000");
 
         SagaInstance sagaInstance = sagaInstanceRepository.findByOrderId(response.id()).orElseThrow();

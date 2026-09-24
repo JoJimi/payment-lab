@@ -68,6 +68,12 @@ set -a && source ./.env && set +a
 
 ## 참고
 
+- **`saga_completion_duration`은 `OrderStatus`가 아니라 `sagaStatus`(COMPLETED/FAILED)로
+  종결을 판정한다**(CodeRabbit 리뷰, PR #82). 정상 흐름에서는 결제만 끝나도 주문 상태가
+  `PAID`가 되지만, 재고 예약·알림 발행은 그 뒤에 별도로 끝난다 — `OrderStatus`만 보면
+  이 단계들을 측정에서 빼먹은 채 "Saga 완료"로 잘못 집계하게 된다. `GET /api/orders/{id}`
+  응답에 `sagaStatus` 필드를 추가해(`OrderResponse`, `docs/api/openapi.yaml`) 이 문제를
+  해결했다.
 - **VU 수가 같다고 부하(주문 유입률)가 같은 건 아니다**(CodeRabbit 리뷰, PR #82).
   `constant-vus`는 닫힌 루프(closed workload) 모델이라, 각 VU가 "이전 반복(주문 생성 +
   Saga 완료 폴링)이 끝나야 다음 반복을 시작한다." 2단계는 폴링 대기 때문에 반복 1회가

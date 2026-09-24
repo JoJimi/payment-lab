@@ -48,7 +48,7 @@ const PRODUCT_ID = Number(__ENV.PRODUCT_ID || 1);
 const UNIT_PRICE = __ENV.UNIT_PRICE || '10000';
 const CURRENCY = __ENV.CURRENCY || 'KRW';
 
-// Saga 완료(주문 상태가 CREATED에서 벗어남)를 기다리는 최대 시간. 2.15의 기본 타임아웃
+// Saga 완료(sagaStatus가 COMPLETED/FAILED로 종결)를 기다리는 최대 시간. 2.15의 기본 타임아웃
 // (10분, app.saga.timeout-minutes)보다 훨씬 짧게 잡는다 — 정상 흐름이면 보통 Outbox
 // 릴레이 폴링 주기(기본 1초) x 3홉(order→payment, payment→order/inventory,
 // inventory→order/notification) 안에서 끝나야 하고, 이 예산(기본 15초)을 넘기는
@@ -81,7 +81,13 @@ export default function () {
 
   const order = JSON.parse(orderRes.body);
   const sagaStart = orderStart;
-  let finalStatus = 'CREATED';
+  // CodeRabbit 리뷰(PR #82) — OrderStatus만으로는 Saga가 진짜 끝났는지 알 수 없다.
+  // 정상 흐름에서는 결제만 끝나도 order.status가 PAID가 되지만, 재고 예약/알림 발행은
+  // 그 뒤에 따로 진행된다 — order.status를 종결 신호로 쓰면 재고·알림 단계를 측정에서
+  // 빼먹은 채 "Saga 완료"로 잘못 집계한다. sagaStatus가 STARTED/COMPENSATING을 벗어나
+  // COMPLETED(정상 종료 또는 보상까지 끝난 취소)나 FAILED(보상 자체 실패, 수동 개입
+  // 필요)가 될 때까지 기다려야 진짜 종결이다.
+  let finalSagaStatus = 'STARTED';
 
   while (Date.now() - sagaStart < POLL_TIMEOUT_MS) {
     sleep(POLL_INTERVAL_MS / 1000);
@@ -91,8 +97,8 @@ export default function () {
       continue; // 일시적 조회 실패는 다음 폴링에서 재시도
     }
     const current = JSON.parse(getRes.body);
-    if (current.status !== 'CREATED') {
-      finalStatus = current.status;
+    if (current.sagaStatus === 'COMPLETED' || current.sagaStatus === 'FAILED') {
+      finalSagaStatus = current.sagaStatus;
       break;
     }
   }
@@ -102,7 +108,7 @@ export default function () {
   // 반복이 예산 안에서 시작됐어도 응답 자체가 예산을 넘겨 도착했다면 타임아웃으로
   // 잡아야 한다(부하가 걸렸을 때 Saga가 실제로 느려지는지를 이 지표가 보여줘야 하므로).
   const elapsed = Date.now() - sagaStart;
-  const completed = finalStatus !== 'CREATED' && elapsed <= POLL_TIMEOUT_MS;
+  const completed = finalSagaStatus !== 'STARTED' && finalSagaStatus !== 'COMPENSATING' && elapsed <= POLL_TIMEOUT_MS;
   // CodeRabbit 리뷰 — 타임아웃/조회 실패로 끝난 주문까지 elapsed(사실상 POLL_TIMEOUT_MS
   // 근처 값)를 saga_completion_duration에 섞으면 p50/p95가 "실제 완료 시간"이 아니라
   // "완료 여부와 무관하게 얼마나 기다렸는가"로 오염된다. 완료가 확인된 주문만 이 Trend에
@@ -111,6 +117,6 @@ export default function () {
     sagaCompletionDuration.add(elapsed);
   }
   check(null, {
-    'Saga가 타임아웃 전에 종결 상태(PAID/FAILED/CANCELLED)로 끝남': () => completed,
+    'Saga가 타임아웃 전에 종결 상태(COMPLETED/FAILED)로 끝남': () => completed,
   });
 }
