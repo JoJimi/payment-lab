@@ -11,6 +11,7 @@ import org.example.cs_study.event.payload.OrderCreatedPayload;
 import org.example.cs_study.event.payload.PaymentRequestedPayload;
 import org.example.cs_study.order.domain.Order;
 import org.example.cs_study.order.domain.saga.SagaInstance;
+import org.example.cs_study.order.domain.saga.SagaStatus;
 import org.example.cs_study.order.domain.saga.SagaStep;
 import org.example.cs_study.order.domain.saga.SagaStepName;
 import org.example.cs_study.order.dto.request.CreateOrderRequest;
@@ -88,12 +89,14 @@ public class OrderService {
                 new OrderCreatedPayload(order.getId(), order.getProductId(), order.getQuantity(), totalAmount, request.currency()));
         outboxService.save(EventType.PAYMENT_REQUESTED, "Order", order.getId().toString(), paymentRequestedPayload);
 
-        return OrderResponse.from(order);
+        return OrderResponse.from(order, sagaInstance.getStatus());
     }
 
     @Transactional(readOnly = true)
     public OrderResponse getOrder(Long orderId) {
         Order order = orderRepository.findById(orderId).orElseThrow(() -> new OrderNotFoundException(orderId));
-        return OrderResponse.from(order);
+        SagaStatus sagaStatus =
+                sagaInstanceRepository.findByOrderId(orderId).map(SagaInstance::getStatus).orElse(null);
+        return OrderResponse.from(order, sagaStatus);
     }
 }

@@ -191,10 +191,24 @@ components:
         createdAt:
           type: string
           format: date-time
+        sagaStatus:
+          $ref: '#/components/schemas/SagaStatus'
+          nullable: true
+          description: >-
+            2단계(Kafka Saga) 이후 추가됨. OrderStatus만으로는 Saga 전체(결제→재고→알림)가
+            끝났는지 알 수 없다 — 정상 흐름에서 결제만 끝나도 status는 PAID가 되고, 재고
+            예약/알림 발행 완료 여부는 sagaStatus가 COMPLETED가 돼야 알 수 있다.
 
     OrderStatus:
       type: string
       enum: [CREATED, PAID, FAILED, CANCELLED]
+
+    SagaStatus:
+      type: string
+      enum: [STARTED, COMPENSATING, COMPLETED, FAILED]
+      description: >-
+        COMPLETED는 정상 흐름 종료와 보상(취소)이 끝까지 성공한 경우를 모두 포함한다.
+        FAILED는 보상 자체가 실패해 수동 개입이 필요한 상태다(2.16 DLQ).
 
     RequestPaymentRequest:
       type: object
