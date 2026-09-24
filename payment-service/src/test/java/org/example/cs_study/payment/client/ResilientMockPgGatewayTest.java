@@ -12,9 +12,15 @@ import io.github.resilience4j.timelimiter.TimeLimiterRegistry;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import org.example.cs_study.mockpg.MockPgServer;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -38,6 +44,11 @@ class ResilientMockPgGatewayTest {
     private static MockPgServer mockPgServer;
     private static String baseUrl;
 
+    // 각 테스트가 newGateway로 만든 게이트웨이를 추적해뒀다가 끝나면 shutdown()한다 — Spring
+    // 밖에서 직접 생성하므로 @PreDestroy가 실행되지 않아, 안 하면 매 테스트가 새 cached
+    // thread pool을 남기고 끝난다(idle 스레드가 최대 60초 유지, CodeRabbit 리뷰, PR #88).
+    private final List<ResilientMockPgGateway> createdGateways = new ArrayList<>();
+
     @BeforeAll
     static void startMockPg() throws IOException {
         mockPgServer = new MockPgServer();
@@ -48,6 +59,12 @@ class ResilientMockPgGatewayTest {
     @AfterAll
     static void stopMockPg() {
         mockPgServer.stop();
+    }
+
+    @AfterEach
+    void shutdownGateways() {
+        createdGateways.forEach(ResilientMockPgGateway::shutdown);
+        createdGateways.clear();
     }
 
     private ResilientMockPgGateway newGateway(CircuitBreakerConfig cbConfig) {
@@ -68,7 +85,9 @@ class ResilientMockPgGatewayTest {
         CircuitBreakerRegistry cbRegistry = CircuitBreakerRegistry.of(cbConfig);
         RetryRegistry retryRegistry = RetryRegistry.of(retryConfig);
         TimeLimiterRegistry tlRegistry = TimeLimiterRegistry.of(tlConfig);
-        return new ResilientMockPgGateway(client, cbRegistry, retryRegistry, tlRegistry);
+        ResilientMockPgGateway gateway = new ResilientMockPgGateway(client, cbRegistry, retryRegistry, tlRegistry);
+        createdGateways.add(gateway);
+        return gateway;
     }
 
     @Test
@@ -258,6 +277,44 @@ class ResilientMockPgGatewayTest {
         // TimeLimiter가 끊었다면 200ms 근처(넉넉히 잡아도 1초 미만)에 돌아온다. 만약
         // TimeLimiter가 배선되지 않아 클라이언트의 5초 소켓 타임아웃이나 PG의 1초 처리
         // 완료를 기다렸다면 1000ms를 훌쩍 넘겼을 것이다.
+        assertThat(elapsedMs).isLessThan(1000L);
+    }
+
+    @Test
+    void 대기_중_스레드가_인터럽트되면_PG_작업을_취소하고_인터럽트_상태를_보존한_채_UNKNOWN을_반환한다() throws Exception {
+        // PG 응답을 2초 지연시켜 충분히 오래 future.get(...)으로 블로킹 대기 중인 상태를
+        // 만든다. TimeLimiter는 넉넉하게(5s) 잡아 이 테스트에서 절대 먼저 끊지 않게 한다 —
+        // 순수하게 인터럽트 자체의 효과만 본다.
+        configureMockPg(2000, 0.0, null, false);
+        TimeLimiterConfig generousTimeLimit =
+                TimeLimiterConfig.custom().timeoutDuration(Duration.ofSeconds(5)).build();
+        ResilientMockPgGateway gateway =
+                newGateway(defaultConfig(), NO_RETRY, Duration.ofSeconds(5), generousTimeLimit);
+
+        AtomicReference<MockPgResult> resultRef = new AtomicReference<>();
+        AtomicBoolean interruptedAfterReturn = new AtomicBoolean(false);
+        CountDownLatch started = new CountDownLatch(1);
+        Thread caller = new Thread(() -> {
+            started.countDown();
+            MockPgResult result =
+                    gateway.requestPayment(UUID.randomUUID().toString(), new BigDecimal("1000.0000"), "KRW");
+            resultRef.set(result);
+            // 여기서 여전히 인터럽트 상태가 살아있어야 한다 — 삼키지 않고 복원했다는 증거다.
+            interruptedAfterReturn.set(Thread.currentThread().isInterrupted());
+        });
+        caller.start();
+        started.await();
+        Thread.sleep(100); // future.get(...) 블로킹 대기 지점에 확실히 들어간 뒤에 인터럽트한다.
+
+        long start = System.nanoTime();
+        caller.interrupt();
+        caller.join(5000);
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+
+        assertThat(caller.isAlive()).isFalse();
+        assertThat(resultRef.get().outcome()).isEqualTo(MockPgOutcome.TIMEOUT);
+        assertThat(interruptedAfterReturn.get()).isTrue();
+        // 2초 지연을 다 기다리지 않고 인터럽트 직후 곧바로 돌아왔는지 확인한다.
         assertThat(elapsedMs).isLessThan(1000L);
     }
 

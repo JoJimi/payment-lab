@@ -13,7 +13,9 @@ import java.math.BigDecimal;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 import org.springframework.stereotype.Component;
 
 /**
@@ -100,17 +102,39 @@ public class ResilientMockPgGateway {
     }
 
     public MockPgResult requestPayment(String idempotencyKey, BigDecimal amount, String currency) {
-        Callable<MockPgResult> withTimeLimiter = TimeLimiter.decorateFutureSupplier(
-                timeLimiter,
-                () -> executor.submit(() -> mockPgClient.requestPayment(idempotencyKey, amount, currency)));
+        // TimeLimiterImpl.decorateFutureSupplier가 대기 중(future.get(timeout, unit))에
+        // InterruptedException을 받으면, TimeoutException/ExecutionException과 달리 future를
+        // 취소하지 않고 그대로 던진다(2.4.0 바이트코드로 확인, CodeRabbit 리뷰, PR #88) — 그
+        // 자리에서 잡지 않으면 PG 호출은 백그라운드에서 계속 진행되는데 이 메서드는 이미
+        // 끝나버려 그 결과를 아무도 반영하지 못한다. 마지막으로 제출한 future를 직접 들고
+        // 있다가, InterruptedException을 받으면 그 future를 취소하고 인터럽트 상태를 복원한다.
+        AtomicReference<Future<MockPgResult>> inFlight = new AtomicReference<>();
+        Callable<MockPgResult> withTimeLimiter = TimeLimiter.decorateFutureSupplier(timeLimiter, () -> {
+            Future<MockPgResult> future =
+                    executor.submit(() -> mockPgClient.requestPayment(idempotencyKey, amount, currency));
+            inFlight.set(future);
+            return future;
+        });
         Callable<MockPgResult> withCircuitBreaker = CircuitBreaker.decorateCallable(circuitBreaker, withTimeLimiter);
         Callable<MockPgResult> withRetry = Retry.decorateCallable(retry, withCircuitBreaker);
         try {
             return withRetry.call();
         } catch (MockPgUnavailableException | CallNotPermittedException | TimeoutException e) {
             return MockPgResult.timedOut();
+        } catch (InterruptedException e) {
+            Future<MockPgResult> future = inFlight.get();
+            if (future != null) {
+                future.cancel(true);
+            }
+            Thread.currentThread().interrupt();
+            // 결제가 실제로 승인됐는지 이 스레드는 더 이상 기다리지 않기로 한 것뿐이다 — PG가
+            // 거절했다는 증거는 없으므로 FAILED가 아니라 UNKNOWN이다(위 클래스 Javadoc과 같은
+            // 원칙). payment는 이미 PENDING으로 저장돼 있어(PaymentService.doRequestPayment),
+            // 여기서 UNKNOWN을 돌려주지 않으면 PaymentService.applyResult에 영영 도달하지
+            // 못하고 PENDING에 갇힌다.
+            return MockPgResult.timedOut();
         } catch (Exception e) {
-            // Callable 계약상 checked Exception이 선언돼 있을 뿐, 위 세 타입 외에는 원래
+            // Callable 계약상 checked Exception이 선언돼 있을 뿐, 위 네 타입 외에는 원래
             // 나올 일이 없다 — 나오면 우리가 모르는 새로운 실패 모드이므로 조용히 삼키지 않는다.
             throw new IllegalStateException("Mock PG 호출 중 예상하지 못한 예외", e);
         }
