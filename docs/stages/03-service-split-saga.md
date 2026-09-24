@@ -1,7 +1,10 @@
 # 2단계 — 서비스 분리 + Kafka Saga
 
-기간: 2026-09-22 ~ (진행 중 — 2-A/2-B/2-C 완료, 2-D 검증 남음)
-관련 PR: [#46](https://github.com/JoJimi/payment-lab/pull/46) ~ [#74](https://github.com/JoJimi/payment-lab/pull/74) (2.1~2.16, 16개)
+기간: 2026-09-22 ~ 2026-09-24 (완료 — 2-A/2-B/2-C/2-D 전부 완료)
+관련 PR: [#46](https://github.com/JoJimi/payment-lab/pull/46) ~
+[#82](https://github.com/JoJimi/payment-lab/pull/82) (21개, 2.1~2.20 태스크 PR + 리뷰
+대응 중 발견된 별도 수정 PR 포함) — 이 문서/벤치마크 결과를 다듬는
+[#83](https://github.com/JoJimi/payment-lab/pull/83)은 별도
 
 ## 목표
 
@@ -11,42 +14,51 @@
 
 ## 완료 기준 달성 현황
 
-로드맵이 정한 2단계 완료 기준 4개 중, 이 문서를 쓰는 시점에 실제로 충족된 건 1개뿐이다 —
-나머지 3개는 2-D(2.17~2.20, 검증 단계)가 아직 시작 전이라 판단할 근거 자체가 없다.
+로드맵이 정한 2단계 완료 기준 4개 중, 2-D(2.17~2.20) 완료 시점 기준으로 2개는 충족,
+1개는 부분 충족(메커니즘은 검증했지만 규모까지는 아님), 1개는 여전히 미충족이다.
 
 | 기준 | 상태 | 증거 |
 |---|---|---|
-| Payment Service 강제 종료 후 재기동 → 주문 100건 전부 완료/보상 (유실 0, 이중 처리 0) | ⏳ | 미착수 — 2.17(장애 주입 테스트)의 몫. 다운스트림이 죽어 응답이 안 오는 상황 자체는 2.15(Saga 타임아웃)가 이미 다루지만, "강제 종료 → 재기동 → 100건 검증"이라는 실측 시나리오는 아직 안 돌렸다 |
-| 재고 초과 판매 0건 (분산 환경에서도) | ⏳ | 1단계 수준(`InventoryConcurrencyTest`, 단일 프로세스 내 300-way 경합)만 확인됨. "분산 환경"이라는 조건은 여러 인스턴스/서비스가 동시에 같은 재고를 다투는 시나리오를 뜻하는데, 2-D 전까지는 검증 대상이 아니었다 |
-| Saga 상태 조회 API로 임의 주문의 진행 단계를 추적 가능 | ⏳ | 미구현 — `saga_instance`/`saga_step` 테이블과 상태 전이 로직(2.11)은 있지만, 이걸 노출하는 REST 엔드포인트는 로드맵 2-A~2-C 어디에도 태스크로 없었다. 2-D 착수 전에 필요성 재확인 필요 (아래 "다음 단계로 넘기는 숙제" 참고) |
+| Payment Service 강제 종료 후 재기동 → 주문 100건 전부 완료/보상 (유실 0, 이중 처리 0) | 🟡 부분 충족 | `FaultInjectionIntegrationTest`(2.17)가 PAYMENT/INVENTORY 강제 장애 → 타임아웃 보상 → 복구 후 뒤늦은 응답 무시, NOTIFICATION 장애에도 주문은 정상 완료되는 3개 시나리오를 실제로 검증한다(`05-saga-orchestration.md` §7, §8). 다만 시나리오당 주문 1건 단위 검증이라, "100건 규모"에서의 유실 0/이중 처리 0까지 실측한 것은 아니다 — 메커니즘은 증명됐지만 규모 검증은 남아 있다 |
+| 재고 초과 판매 0건 (분산 환경에서도) | ⏳ 미충족 | 여전히 1단계 수준(`InventoryConcurrencyTest`, 단일 프로세스 내 300-way 경합)만 확인됨. 2.19(`SagaEndToEndIntegrationTest`)가 진짜 Kafka 컨테이너를 쓰긴 하지만 서비스 인스턴스가 여러 개 동시에 같은 재고를 다투는 시나리오는 아니다 — "분산 환경"이라는 조건은 3단계 이후로 남는다 |
+| Saga 상태 조회 API로 임의 주문의 진행 단계를 추적 가능 | ✅ | 2.20(PR #82)에서 `GET /api/orders/{id}` 응답에 `sagaStatus`(`SagaStatus` — STARTED/COMPENSATING/COMPLETED/FAILED) 필드를 추가했다(`OrderResponse`, `docs/api/openapi.yaml`). 처음부터 계획된 태스크는 아니었고, 2.20 k6 측정에서 `OrderStatus`만으로는 Saga 완료를 오판한다는 CodeRabbit 리뷰를 받아 추가하며 이 완료 기준도 같이 충족됐다 |
 | `KafkaTemplate` 직접 호출 PR이 Semgrep에 의해 차단됨 (검증 완료) | ✅ | `.semgrep/outbox-required.yml`(2.10) — `semgrep --test` 통과 + 의도적 위반 코드로 실제 차단 확인(`troubleshooting/04-msa-split.md` §15) |
 
 ## 핵심 결과
 
-- **PR 16개**(#46~#74, 2.1~2.16 각 1:1), 전부 CodeRabbit 리뷰 반영 후 병합. 이 중 1건(#77/#78
-  범위, 2.2)은 CodeRabbit이 잡은 보안 이슈(DB 자격증명 평문 커밋)를 같은 PR에서 바로 수정.
+- **PR 21개**(#46~#82) + 성능 실측/문서 정리 PR 1개(#83), 전부 CodeRabbit
+  리뷰 반영 후 병합. 이 중 1건(#77/#78 범위, 2.2)은 CodeRabbit이 잡은 보안 이슈(DB 자격증명
+  평문 커밋)를 같은 PR에서 바로 수정. 2.20(PR #82)은 CodeRabbit 리뷰 라운드만 6회 — 측정
+  방법론 결함(부하 동등성, 타임아웃 판정, `sagaStatus` 부재) Major 6건 + Minor 4건 +
+  outside-diff 2건을 전부 반영했다(`troubleshooting/06-saga-performance-measurement.md`).
 - **모듈 1개 → 11개**: 모놀리식 `cs_study` 하나였던 것이 `common-*` 6개(event/idempotency/
   inbox/kafka/outbox/web) + 서비스 4개(order/payment/inventory/notification) +
   테스트 픽스처 1개(mock-pg-server)로 늘었다.
 - **Kafka 토픽 8개 = 이벤트 타입 8개** (1:1 대응, `EventType` enum으로 고정):
   `order.created`, `payment.requested`, `payment.completed`, `payment.failed`,
   `inventory.reserved`, `inventory.failed`, `order.cancelled`, `notification.requested`.
-- **테스트**: 전체 테스트 파일 약 31개, `@Test` 메서드 109개. Testcontainers 필요(Postgres/
-  Redis) 20개 파일, `@EmbeddedKafka` 필요 7개 파일, 나머지는 Docker 불필요한 순수 단위
-  테스트 — 이 비율이 이 원격 세션(Docker 없음)에서 "무엇까지 직접 검증했고 무엇을 CI에
-  넘겼는지"를 그대로 반영한다(각 PR 설명에 매번 명시).
+- **테스트**: 전체 테스트 파일 약 34개, `@Test` 메서드 124개(2-D 완료 시점 재측정 —
+  2.17~2.19에서 `FaultInjectionIntegrationTest`/중복 주입 테스트/`SagaEndToEndIntegrationTest`가
+  추가됨). Testcontainers 필요(Postgres/Redis/Kafka) 다수, `@EmbeddedKafka` 필요 다수,
+  나머지는 Docker 불필요한 순수 단위 테스트 — 이 비율이 이 원격 세션(Docker 없음)에서
+  "무엇까지 직접 검증했고 무엇을 CI에 넘겼는지"를 그대로 반영한다(각 PR 설명에 매번 명시).
 - **DLQ 재시도**: 500ms 간격, 최초 시도 포함 총 3회 — payment-service의 Mock PG 재시도
   설정값과 의도적으로 맞췄다(2.16).
 - **Saga 타임아웃**: 기본 10분(`app.saga.timeout-minutes`), 회수 스케줄러 폴링 주기 30초
   (`app.saga.timeout.scheduler.fixed-delay-ms`) — 둘 다 테스트에서 주입 가능하도록 설정값으로
   뺐다(2.15).
 - **CI 실행 시간 추이**(`build-test`, `PR Check` 워크플로 실측): 멀티모듈 전환 직후
-  (2.1~2.6, DB 분리까지만) 약 **3.5~4분** → Kafka/Outbox/Inbox가 들어온 뒤(2.8~2.10)
-  약 **8~9분** → 4개 서비스가 전부 Saga로 엮이는 통합 테스트가 쌓인 뒤(2.11~2.16) 약
-  **13~15분**. 1단계 종료 시점(2분 50초~2분 57초, `stages/02-monolithic-core.md`)과 비교하면
-  2단계를 거치며 CI 시간이 약 5배 늘었다 — 서비스/토픽/통합 테스트가 늘어난 만큼 자연스러운
-  증가이고, 아직 로드맵의 10분 기준을 위협하는 수준은 아니다(2.4 검토 기록,
-  `docs/ci-cd.md` 참고).
+  (2.1~2.6, DB 분리까지만) 약 **3분 6초~3분 43초** → Kafka/Outbox/Inbox가 들어온 뒤
+  (2.8~2.10) 약 8~9분 → 2.19에서 `SagaEndToEndIntegrationTest`(진짜 Testcontainers
+  Kafka 컨테이너 사용)가 추가되며 **16분 30초**(PR #80 실측)로 뛰어 **로드맵 1.22가
+  예고한 10분 기준을 이때 처음 넘었다**. PR #82(2.20, 16분 18초)에서도 비슷한 수준을
+  유지한다. 1단계 종료 시점(2분 50초~2분 57초, `stages/02-monolithic-core.md`) 대비
+  약 6배 늘었다. **부록 E-3의 분리 단계(무거운 통합 테스트를 nightly로)는 아직 밟지
+  않았다** — 늘어난 원인이 `SagaEndToEndIntegrationTest` 하나(컨테이너 이미지 pull +
+  브로커 부팅 오버헤드)로 명확히 특정되고, E-3 원칙 자체가 "Saga 보상 테스트는 절대
+  nightly로 빼지 말 것"이라 이 테스트가 정확히 그 예외에 해당하기 때문이다(판단 근거
+  전문은 `docs/ci-cd.md` "2.19 — Testcontainers Kafka 도입 후 build-test 소요시간" 참고).
+  3단계 이후 통합 테스트가 더 늘어나면 그때 재검토한다.
 
 ## 이 단계에서 내린 결정
 
@@ -84,11 +96,18 @@
   `@SpringBootTest`의 `TestTypeExcludeFilter`, Outbox 컬럼 길이/트랜잭션 전파 버그,
   컨슈머 멱등성 TOCTOU 등.
 - [`troubleshooting/05-saga-orchestration.md`](../troubleshooting/05-saga-orchestration.md) —
-  Saga 오케스트레이션(2-C, 2.11~2.16) 과정에서 겪은 문제. notification-service의 Boot 4
+  Saga 오케스트레이션(2-C, 2.11~2.17) 과정에서 겪은 문제. notification-service의 Boot 4
   Kafka 자동구성 조용한 실패, Saga 타임아웃이 이미 확정된 재고를 놓칠 뻔한 레이스, DLT
-  접미사(`.DLT` vs `-dlt`) 오검, `InventoryConcurrencyTest` CI 플레이크 등.
-- 두 문서 모두 상단에 "겪은 문제 요약" 표를 두고 실제 버그/장애(설계 결정이 아닌 것)만
-  추려뒀다 — 전체 맥락은 각 절 본문에 그대로 남아 있다.
+  접미사(`.DLT` vs `-dlt`) 오검, `InventoryConcurrencyTest` CI 플레이크, 장애 주입
+  테스트가 실제로 찾아낸 `PaymentCompletedListener` 상태 가드 누락 버그(§7) 등. §8(2.18
+  중복 이벤트 주입 — 버그는 못 찾았지만 멱등성이 "설계상 그럴 것"에서 "실제로 확인됨"이
+  됨), §9(2.19 Testcontainers E2E — 정본 회귀 스위트, PR #80에서 만난 무관한 CI
+  플레이키 진단)도 여기 포함된다.
+- [`troubleshooting/06-saga-performance-measurement.md`](../troubleshooting/06-saga-performance-measurement.md) —
+  2.20(1단계 대비 성능 비교) 실측 과정에서 겪은 문제 8건. Gradle daemon 동시성 경합,
+  `.env` 미source, 고아 컨테이너, notification-service Flyway 베이스라인, 측정
+  스크립트가 `main`에 없던 문제, CodeRabbit 리뷰 12건(측정 방법론 결함), 상품 시드
+  데이터 부재, VUs=20에서 Saga 완료율 0%(로컬 리소스 경합 — 로직 버그 아님) 등.
 
 ## 배운 것
 
@@ -114,19 +133,28 @@
 
 ## 다음 단계로 넘기는 숙제
 
-- **2-D(2.17~2.20) 자체가 아직 시작 전이다** — 장애 주입 테스트(2.17), 중복 이벤트 강제
-  주입(2.18), Testcontainers 기반 Saga 통합 테스트(2.19), 1단계 대비 성능 비교(2.20)
-  네 태스크 모두 남아 있다. 위 "완료 기준 달성 현황"의 ⏳ 3개는 이 태스크들이 끝나야
-  ✅로 바뀐다.
+2-D(2.17~2.20)까지 전부 완료했지만, 그 과정에서 확인된 한계와 새로 생긴 숙제가 있다.
+
+- **"100건 규모"/"분산 환경" 완료 기준은 메커니즘만 검증됐다** — 위 "완료 기준 달성
+  현황" 표의 1번(강제 종료 100건)과 2번(분산 환경 재고 초과 판매 0건)은 2.17/2.19로
+  메커니즘 자체는 증명했지만, 로드맵이 명시한 규모("100건", "분산 환경")까지 실측한 건
+  아니다. 실제로 그 규모에서 검증이 필요해지면(3단계 종합 벤치마크 3.12 등) 별도
+  태스크로 잡아야 한다.
 - **PAYMENT/UNKNOWN 재조회 + `cancelForOrder()` TOCTOU** — 이슈
   [#72](https://github.com/JoJimi/payment-lab/issues/72)로 이월. 로드맵 3.4(실제 PG 상태
   재조회)가 선행돼야 제대로 닫힌다.
-- **Saga 상태 조회 API 필요성 재확인** — 로드맵 완료 기준에는 있지만 2-A~2-C 태스크
-  목록에는 없었다. 2-D 착수 전에 이 API가 실제로 필요한지(검증 테스트가 필요로 하는지),
-  필요하다면 어느 태스크에 붙일지 정해야 한다.
-- **2.20 실측은 로컬 Docker 환경 필요** — 이 세션(원격, Docker 없음)에서는 실행할 수
-  없다. `scripts/measure-baseline.sh`를 참고해 준비해둔 2단계용 성능 비교 스크립트를
-  로컬에서 직접 돌려야 한다(아래 참고).
-- **벤치마크 스크립트/문서 9종이 여전히 stale 상태** — `04-msa-split.md` §2에서 2-B 완료
-  후 재작성하기로 미뤄둔 것이 아직 그대로다. 2.20과 자연스럽게 묶어서 이번에 함께
-  처리하는 게 맞다.
+- **2.20 실측이 확인한 것: 로컬 데스크톱 하나로는 VUs=20 부하를 감당 못 한다** —
+  VUs=5까지는 Saga 타임아웃 실패율 0%, VUs=10부터 급격히 무너져 VUs=20에서는 100%
+  실패했다. 로직 문제가 아니라 이 개발자 머신(JVM 4개 + Kafka + Postgres 3개 + Redis
+  동시 구동)의 CPU 경합이 원인임을 VUs=1 재현으로 확인했다 — 서버급 환경에서 VUs를
+  맞춰 재측정하는 게 3단계 이후 숙제로 남는다(`troubleshooting/06-saga-performance-measurement.md`
+  "남은 과제").
+- **1단계 벤치마크 스크립트/문서 9종은 여전히 stale 상태** — `04-msa-split.md` §2가
+  가리키는 `scripts/measure-baseline.{sh,ps1}` 등 **1단계 전용** 스크립트/문서다(단일
+  프로세스, 포트 8080 가정) — 2.20에서 새로 만든 2단계용 `scripts/measure-saga-baseline.sh`/
+  `benchmarks/04-saga-comparison.md`와는 다른 파일들이다. 1단계 스크립트에 end-to-end
+  Trend를 추가해 2단계와 엄밀히 비교 가능하게 만드는 것도 같이 남아 있다
+  (`benchmarks/04-saga-comparison.md` "1단계 대비 비교" 참고).
+- **상품 시드 자동화** — `products`/`inventory`에 시드 데이터나 생성 API가 없어 2.20
+  측정마다 수동 INSERT가 필요했다. 반복 측정이 잦아지면(3단계 이후) Flyway 시드
+  마이그레이션이나 `POST /api/products` 엔드포인트를 고려할 만하다.
