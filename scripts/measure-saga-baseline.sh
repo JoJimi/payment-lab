@@ -32,8 +32,15 @@ CURRENCY=${CURRENCY:-KRW}
 VUS=${VUS:-20}
 DURATION=${DURATION:-60s}
 ORDER_SERVICE_URL=${ORDER_SERVICE_URL:-http://localhost:8081}
+INVENTORY_SERVICE_URL=${INVENTORY_SERVICE_URL:-http://localhost:8083}
 
 mkdir -p benchmarks/raw
+
+# CodeRabbit 리뷰(PR #82) — 새 DB에서 inventory-service:bootRun 직후 바로 이 UPDATE를
+# 실행하면 Flyway 마이그레이션(inventory 테이블 생성)보다 먼저 실행될 수 있다. Spring
+# Boot는 Flyway 마이그레이션이 끝나야 컨텍스트가 뜨고 actuator/health가 UP이 되므로,
+# inventory-service의 readiness를 먼저 확인하면 테이블 존재가 보장된다.
+wait_for_app_ready "${INVENTORY_SERVICE_URL}/actuator/health"
 
 # inventory 테이블은 이제 postgres-inventory(2.2, 5434 포트) 안에 있다 — 1단계의 단일
 # payment-lab-postgres 컨테이너가 아니다.
