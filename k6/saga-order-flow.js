@@ -39,7 +39,11 @@ export const options = {
     },
   },
   thresholds: {
-    order_success_rate: ['rate>0.99'],
+    // CodeRabbit 리뷰(PR #82) — rate>0.99는 1% 실패를 허용해버려서 "주문 생성 실패가
+    // 있는 회차를 성공으로 처리하지 않기"라는 원래 요구를 완전히 만족하지 못한다.
+    // 성능 베이스라인 측정은 요청 하나라도 실패하면 그 회차 자체가 무효이므로 rate==1로
+    // 무관용(zero-tolerance)으로 건다.
+    order_success_rate: ['rate==1'],
   },
 };
 
