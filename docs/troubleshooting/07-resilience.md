@@ -361,3 +361,38 @@ Resilience4j는 그보다 훨씬 빠른 시간 안에 자체적으로 결론(승
 이미 갖춘 "이벤트가 없으면 Saga가 타임아웃으로 회수한다"는 경로가 그 자체로 이 설계
 요구사항을 만족한다. 이 절은 그 사실을 명시적으로 검증하고 기록해, "왜 payment-service
 안에 별도 재시도 큐를 안 뒀는가"라는 질문에 근거를 남기는 것이 목적이다.
+
+### 7. 장애 시나리오 스크립트와 서킷 상태 전이 관찰 (3.7~3.8)
+
+**배경**: 3.1~3.6이 배선한 방어 로직이 실제로 동작하는지는 코드를 읽는 것만으로는
+증명되지 않는다 — Mock PG에 실제로 지연/실패/타임아웃을 주입하면서 서킷이 정말
+CLOSED→OPEN→HALF_OPEN→CLOSED로 전이하는지 눈으로 확인해야 한다. 여기서 걸리는 문제가
+하나 있다: `PaymentController`의 `POST /api/payments`는 `UnimplementedOrderValidator`
+(2.1/2.3, 항상 501)를 거치므로 Mock PG까지 절대 도달하지 못한다. Mock PG를 실제로
+때리려면 order-service의 `POST /api/orders`가 Outbox로 발행하는 `payment.requested`를
+`PaymentRequestedListener`가 소비해 `requestPaymentFromSaga`로 넘어가는 경로(2.12)를
+타야 한다.
+
+**스크립트**: `scripts/fault-scenario-mockpg.sh`(3.7)가 이 경로로 부하를 생성하면서
+mock-pg-server의 `POST /pg/_config`로 `delayMs`/`failureRate`/`forceTimeout`을 단계별로
+바꾼다. 4개 시나리오(`gradual-latency`/`intermittent-failure`/`complete-down`/
+`slow-recovery`) 중 `complete-down`(`forceTimeout=true`, 30초)으로 실제 전이를 확인했다.
+
+**관측 — Grafana state-timeline 패널**: `observability/grafana/dashboards/payment-lab-overview.json`에
+`resilience4j_circuitbreaker_state{name="mockPg"} > 0`를 쿼리하는 state-timeline 패널을
+추가해 상태를 색깔 구간으로 시각화했다(이 작업 중에 이 대시보드의 다른 5개 패널이
+2.1 멀티모듈 분리 이후에도 여전히 `job="payment-lab"`(1단계 모놀리식 시절 라벨)을 쓰고
+있어서 전부 No data였던 것도 같이 발견해 서비스별 job으로 고쳤다). `complete-down` 실행
+결과, CLOSED → OPEN → HALF_OPEN → CLOSED 전이를 실제로 캡처했다.
+
+**HALF_OPEN에서 한동안 멈춰 있던 이유**: `complete-down` 종료 직후 패널이 HALF_OPEN에서
+몇 분간 더 움직이지 않는 게 관찰됐다. `application.yml`의 `mockPg` 설정은
+`wait-duration-in-open-state: 10s`, `permitted-number-of-calls-in-half-open-state: 3`이다
+— HALF_OPEN은 실제로 Mock PG까지 도달하는 호출이 3번 쌓여야 CLOSED/OPEN 여부를 판단한다.
+스크립트의 "정상 구간으로 복귀" 단계가 보낸 주문 중 일부는 아직 OPEN 대기 시간이 안 끝나
+즉시 거부됐고, HALF_OPEN 진입 이후 실제로 판단에 반영된 호출이 3번을 못 채운 채 스크립트가
+종료돼 트래픽이 끊겼다 — 버그가 아니라 probe 호출이 부족했을 뿐이다. 이후 주문을 몇 개 더
+보내 probe 3번을 채우자 정상적으로 CLOSED로 복귀했다. **시사점**: HALF_OPEN 관찰은 장애
+시나리오가 끝난 뒤에도 정상 트래픽이 최소 `permitted-number-of-calls-in-half-open-state`
+번은 이어져야 완결된다 — `fault-scenario-mockpg.sh`의 "정상 구간으로 복귀" 단계 부하량이
+이 값보다 여유 있게 커야 스크립트 실행만으로 풀 사이클이 항상 재현된다는 뜻이기도 하다.
