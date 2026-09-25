@@ -13,8 +13,10 @@ import io.github.resilience4j.timelimiter.TimeLimiter;
 import io.github.resilience4j.timelimiter.TimeLimiterRegistry;
 import java.math.BigDecimal;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.springframework.stereotype.Component;
 
@@ -74,6 +76,22 @@ import org.springframework.stereotype.Component;
  * 다만 이 격리는 동시 처리량의 상한일 뿐, 3.4가 남긴 "blocking 클라이언트가 인터럽트에
  * 응답하지 않는다"는 한계 자체를 없애지는 못한다 — 거부된 요청이 줄어들 뿐, 이미 실행 중인
  * 스레드가 타임아웃 이후에도 소켓을 붙들고 있을 수 있다는 사실은 그대로다.
+ *
+ * <p><b>Bulkhead 거부는 CircuitBreaker 실패가 아니다</b>: {@code application.yml}의
+ * {@code resilience4j.circuitbreaker.instances.mockPg.ignore-exceptions}에
+ * {@link BulkheadFullException}을 명시해뒀다(CodeRabbit 리뷰, PR #89) — 우리 쪽 스레드풀이
+ * 잠깐 포화됐다는 사실은 PG가 응답을 못 준다는 증거가 아니므로, 부하가 몰려 거부가 늘어도
+ * 그 자체로 서킷이 열리면 안 된다(카드 거절이 CB에 안 잡히는 3.2와 같은 원칙).
+ *
+ * <p><b>큐에서 대기 중인 작업의 취소는 협조적(cooperative)이다</b>: {@code ThreadPoolBulkhead
+ * .submit()}이 돌려주는 {@code CompletableFuture}에 {@code cancel(true)}를 불러도 실제
+ * 제출된 작업은 막지 못한다(CodeRabbit 리뷰, PR #89) — {@code submit()}은 내부적으로 만든
+ * 별도의 future로 실제 제출을 하고 우리에게는 그 결과를 나중에 전달만 받는 새
+ * {@code CompletableFuture}를 돌려주며, {@code CompletableFuture}는 애초에 인터럽트로
+ * 처리를 제어하지 않는다(JDK Javadoc). 그래서 {@link #requestPayment}는 대신 제출하는
+ * 작업 자체에 "이미 포기했다" 플래그를 심어, 아직 큐에서 대기 중인(실행을 시작하지 않은)
+ * 작업이 PG를 호출하기 직전에 스스로 멈추게 한다 — 이미 PG 호출을 시작해 블로킹 중인
+ * 작업까지는 여전히 막을 수 없다.
  */
 @Component
 public class ResilientMockPgGateway {
@@ -121,12 +139,29 @@ public class ResilientMockPgGateway {
         // InterruptedException을 받으면, TimeoutException/ExecutionException과 달리 future를
         // 취소하지 않고 그대로 던진다(2.4.0 바이트코드로 확인, CodeRabbit 리뷰, PR #88) — 그
         // 자리에서 잡지 않으면 PG 호출은 백그라운드에서 계속 진행되는데 이 메서드는 이미
-        // 끝나버려 그 결과를 아무도 반영하지 못한다. 마지막으로 제출한 future를 직접 들고
-        // 있다가, InterruptedException을 받으면 그 future를 취소하고 인터럽트 상태를 복원한다.
+        // 끝나버려 그 결과를 아무도 반영하지 못한다.
+        //
+        // 다만 threadPoolBulkhead.submit()이 돌려주는 CompletableFuture에 cancel(true)를
+        // 불러도 실제 작업은 막지 못한다(CodeRabbit 리뷰, PR #89) — submit()은 내부적으로
+        // 만든 별도의 future(우리가 절대 접근할 수 없다)로 실제 제출을 하고, 우리가 받는 건
+        // 그 결과를 나중에 전달만 받는 새 CompletableFuture다. 게다가 CompletableFuture는
+        // JDK 계약상 애초에 인터럽트로 처리를 제어하지 않으므로(Javadoc), cancel(true)의
+        // mayInterruptIfRunning은 이 타입에서 아무 효과가 없다 — 이미 큐에서 대기 중인
+        // 작업조차 이 호출만으로는 막을 수 없다. 그래서 대신 제출하는 작업 자체에 "이미
+        // 포기했다" 플래그를 심어, 아직 실행을 시작하지 않은(큐에서 대기 중인) 작업이라면
+        // PG를 호출하기 직전에 스스로 멈추게 한다 — 이미 PG 호출을 시작해 블로킹 중인
+        // 작업까지는 여전히 막을 수 없다(blocking 클라이언트가 인터럽트를 무시하는 3.4의
+        // 한계는 그대로 남는다).
+        AtomicBoolean cancelled = new AtomicBoolean(false);
         AtomicReference<Future<MockPgResult>> inFlight = new AtomicReference<>();
         Callable<MockPgResult> withTimeLimiter = TimeLimiter.decorateFutureSupplier(timeLimiter, () -> {
             Future<MockPgResult> future = threadPoolBulkhead
-                    .submit(() -> mockPgClient.requestPayment(idempotencyKey, amount, currency))
+                    .submit(() -> {
+                        if (cancelled.get()) {
+                            throw new CancellationException("호출자가 이미 포기해 PG를 호출하지 않는다");
+                        }
+                        return mockPgClient.requestPayment(idempotencyKey, amount, currency);
+                    })
                     .toCompletableFuture();
             inFlight.set(future);
             return future;
@@ -138,6 +173,7 @@ public class ResilientMockPgGateway {
         } catch (MockPgUnavailableException | CallNotPermittedException | TimeoutException | BulkheadFullException e) {
             return MockPgResult.timedOut();
         } catch (InterruptedException e) {
+            cancelled.set(true);
             Future<MockPgResult> future = inFlight.get();
             if (future != null) {
                 future.cancel(true);
