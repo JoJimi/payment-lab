@@ -1,19 +1,34 @@
 #!/usr/bin/env bash
 set -uo pipefail
-# set -e를 쓰지 않는다 — 이 스크립트의 목적 자체가 결제 요청을 실패/타임아웃시키는
-# 것이라, curl이 4xx/5xx나 타임아웃을 돌려줘도 스크립트가 죽으면 안 된다.
+# set -e를 쓰지 않는다 — 이 스크립트의 목적 자체가 주문/결제를 실패/타임아웃시키는
+# 것이라, curl이 4xx/5xx나 타임아웃을 돌려줘도 스크립트가 죽으면 안 된다. 다만 Mock PG
+# 설정 변경(mockpg_config/mockpg_reset)은 실패하면 시나리오 자체가 무의미해지므로 그
+# 요청만은 실패 시 즉시 종료한다(CodeRabbit 리뷰, PR #91).
 
 # 로드맵 3.7 — Mock PG 장애 시나리오 스크립트.
 # ResilientMockPgGateway(3.1~3.6, Retry→CircuitBreaker→TimeLimiter→Bulkhead)가 실제로
 # 장애 상황에서 어떻게 반응하는지 Grafana에서 눈으로 보기 위해, mock-pg-server의
-# POST /pg/_config를 단계적으로 바꿔가며 동시에 결제 요청을 계속 쏜다.
+# POST /pg/_config를 단계적으로 바꿔가며 동시에 주문을 계속 생성한다.
+#
+# 왜 payment-service를 직접 부르지 않고 order-service를 거치는가(CodeRabbit 리뷰, PR
+# #91) — POST /api/payments(PaymentService.requestPayment)는 OrderValidator.assertValid를
+# 먼저 호출하는데, 2.1/2.3 이후 유일한 구현체인 UnimplementedOrderValidator는 모든
+# 요청을 NOT_IMPLEMENTED(501)로 거부한다(order-service와의 실제 연동은 Kafka Saga로만
+# 복원됨). 즉 payment-service를 직접 두드리면 Mock PG에 아예 도달하지 못한다 — 실제로
+# ResilientMockPgGateway를 거치는 유일한 경로는 order-service가 주문을 만들며 발행하는
+# payment.requested 이벤트를 PaymentRequestedListener가 받아 호출하는
+# PaymentService.requestPaymentFromSaga뿐이다. 그래서 이 스크립트는 order-service의
+# POST /api/orders로 주문을 계속 생성해 그 경로를 통해 부하를 만든다.
 #
 # 이 세션(Docker 없는 원격 컨테이너)에서는 실행할 수 없다 — 로컬에서 돌릴 것(3.8/3.9).
 #
 # 사용법:
 #   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
 #   ./gradlew :mock-pg-server:run &
+#   ./gradlew :order-service:bootRun &
 #   ./gradlew :payment-service:bootRun &
+#   ./gradlew :inventory-service:bootRun &
+#   ./gradlew :notification-service:bootRun &
 #   ./scripts/fault-scenario-mockpg.sh <시나리오>
 #
 # 시나리오 (인자 하나, 기본값 all):
@@ -59,53 +74,69 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/_wait-for-app.sh"
 
 MOCKPG_URL=${MOCKPG_URL:-http://localhost:8090}
+ORDER_SERVICE_URL=${ORDER_SERVICE_URL:-http://localhost:8081}
 PAYMENT_SERVICE_URL=${PAYMENT_SERVICE_URL:-http://localhost:8082}
-CURRENCY=${CURRENCY:-KRW}
+PRODUCT_ID=${PRODUCT_ID:-1}
+STOCK=${STOCK:-100000} # 부하 자체가 목적이라 재고 소진으로 주문이 막히지 않게 넉넉히 채운다.
 UNIT_PRICE=${UNIT_PRICE:-10000}
-# 결제 요청 사이 간격(초). 너무 촘촘하면 Bulkhead(3.5, core=4/max=8/queue=8)가 금방 차서
+CURRENCY=${CURRENCY:-KRW}
+# 요청 사이 간격(초). 너무 촘촘하면 Bulkhead(3.5, core=4/max=8/queue=8)가 금방 차서
 # 관찰하려는 CircuitBreaker 전이보다 BulkheadFullException이 먼저 보일 수 있다.
 REQUEST_INTERVAL_SEC=${REQUEST_INTERVAL_SEC:-0.3}
 
-# 스크립트 실행 전체에서 유일한 orderId를 보장한다(payments 테이블의
-# ux_payments_active_order 부분 유니크 인덱스 — 같은 orderId로 PENDING/APPROVED/UNKNOWN
-# 결제가 중복되면 INSERT가 막힌다).
-ORDER_ID_BASE=$(($(date +%s) * 1000))
-REQUEST_COUNTER=0
-
+# Mock PG 설정 변경/초기화 — 실패하면 시나리오 자체가 의도한 상태와 어긋나므로
+# 즉시 종료한다(CodeRabbit 리뷰, PR #91). 결제/주문 요청의 실패는 이 스크립트가
+# 의도적으로 유발하는 정상적인 결과라 별도로 취급한다(아래 send_order 참고).
 mockpg_config() {
   local delay_ms=$1 failure_rate=$2 forced_error=$3 force_timeout=$4
-  curl -sf -X POST "${MOCKPG_URL}/pg/_config" \
+  if ! curl -sf --connect-timeout 5 --max-time 15 -X POST "${MOCKPG_URL}/pg/_config" \
     -H 'Content-Type: application/json' \
     -d "{\"delayMs\":${delay_ms},\"failureRate\":${failure_rate},\"forcedErrorCode\":${forced_error},\"forceTimeout\":${force_timeout}}" \
-    >/dev/null
+    >/dev/null; then
+    echo "Mock PG 설정 요청에 실패했습니다 (${MOCKPG_URL}/pg/_config) — 시나리오를 중단합니다." >&2
+    exit 1
+  fi
 }
 
 mockpg_reset() {
-  curl -sf -X POST "${MOCKPG_URL}/pg/_config" -H 'Content-Type: application/json' -d '{"reset":true}' >/dev/null
+  if ! curl -sf --connect-timeout 5 --max-time 15 -X POST "${MOCKPG_URL}/pg/_config" \
+    -H 'Content-Type: application/json' -d '{"reset":true}' >/dev/null; then
+    echo "Mock PG 초기화 요청에 실패했습니다 (${MOCKPG_URL}/pg/_config)." >&2
+    return 1
+  fi
 }
 
-# 결제 한 건을 보내고 (HTTP 상태, 걸린 시간)만 한 줄로 남긴다 — 실패/타임아웃이
-# 이 스크립트에서는 정상적으로 기대되는 결과이므로 에러로 취급하지 않는다.
-send_payment() {
-  REQUEST_COUNTER=$((REQUEST_COUNTER + 1))
-  local order_id=$((ORDER_ID_BASE + REQUEST_COUNTER))
-  local idempotency_key="fault-scenario-${order_id}"
+# 스크립트가 정상 종료하든, 중간에 중단(Ctrl-C)되든 로컬 Mock PG를 장애 상태로
+# 남겨두지 않는다(CodeRabbit 리뷰, PR #91) — 이후 다른 작업(3.8/3.9 관찰, 다른
+# 시나리오 재실행)이 이전 실행의 잔여 설정에 영향받지 않게 한다.
+cleanup() {
+  echo ""
+  echo "정리 중 — Mock PG 설정을 기본값으로 되돌립니다"
+  mockpg_reset || echo "정리 중 Mock PG 초기화에 실패했습니다 — 다음 실행 전에 수동으로 확인하세요." >&2
+}
+trap cleanup EXIT INT TERM
+
+# order-service에 주문 하나를 생성한다(성공/실패 모두 이 스크립트 입장에서는 정상
+# 결과다 — 실패/타임아웃을 관찰하는 게 목적이므로 curl 실패 자체를 에러로 취급하지
+# 않는다). 실제 결제 처리는 order-service가 발행한 payment.requested 이벤트를
+# PaymentRequestedListener가 받아 비동기로 수행한다(위 헤더 주석 참고) — 이 함수는
+# Saga 완료를 기다리지 않는다.
+send_order() {
   local result
   result=$(curl -s -o /dev/null -w '%{http_code} %{time_total}' --max-time 15 \
-    -X POST "${PAYMENT_SERVICE_URL}/api/payments" \
-    -H "Idempotency-Key: ${idempotency_key}" \
+    -X POST "${ORDER_SERVICE_URL}/api/orders" \
     -H 'Content-Type: application/json' \
-    -d "{\"orderId\":${order_id},\"amount\":${UNIT_PRICE},\"currency\":\"${CURRENCY}\"}" \
+    -d "{\"productId\":${PRODUCT_ID},\"quantity\":1,\"unitPrice\":${UNIT_PRICE},\"currency\":\"${CURRENCY}\"}" \
     2>/dev/null || echo "curl-error -1")
-  printf '  orderId=%s -> %s\n' "${order_id}" "${result}"
+  printf '  order -> %s\n' "${result}"
 }
 
-# duration_sec 동안 REQUEST_INTERVAL_SEC 간격으로 결제 요청을 계속 보낸다.
+# duration_sec 동안 REQUEST_INTERVAL_SEC 간격으로 주문 생성 요청을 계속 보낸다.
 generate_load() {
   local duration_sec=$1
   local end_time=$((SECONDS + duration_sec))
   while [ "${SECONDS}" -lt "${end_time}" ]; do
-    send_payment
+    send_order
     sleep "${REQUEST_INTERVAL_SEC}"
   done
 }
@@ -166,9 +197,14 @@ scenario_slow_recovery() {
 
 SCENARIO=${1:-all}
 
-phase "Mock PG(${MOCKPG_URL})/payment-service(${PAYMENT_SERVICE_URL}) readiness 확인"
+phase "order-service(${ORDER_SERVICE_URL})/payment-service(${PAYMENT_SERVICE_URL}) readiness 확인"
+wait_for_app_ready "${ORDER_SERVICE_URL}/actuator/health"
 wait_for_app_ready "${PAYMENT_SERVICE_URL}/actuator/health"
-mockpg_reset
+
+if ! mockpg_reset; then
+  echo "Mock PG(${MOCKPG_URL})에 연결할 수 없습니다 — ./gradlew :mock-pg-server:run으로 먼저 띄우세요." >&2
+  exit 1
+fi
 
 case "${SCENARIO}" in
   gradual-latency) scenario_gradual_latency ;;
@@ -187,5 +223,4 @@ case "${SCENARIO}" in
     ;;
 esac
 
-mockpg_reset
-phase "완료 — Mock PG 설정을 기본값으로 되돌렸습니다"
+phase "완료"
