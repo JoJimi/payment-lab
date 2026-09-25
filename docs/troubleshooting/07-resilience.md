@@ -254,3 +254,34 @@ TIMEOUT(BulkheadFullException으로 즉시 거부)이었다. 5회 반복 실행�
 개수에 확실한 상한이 생겼다는 점이 3.4와의 차이다 — 전에는 무제한으로 늘어날 수 있었다.
 Fallback 설계(서킷이 OPEN이거나 Bulkhead가 가득 찼을 때 무엇을 돌려줄지)는 3.6에서
 이어간다.
+
+**추가 수정 1 — Bulkhead 거부가 CircuitBreaker 실패로 잘못 잡혔다(CodeRabbit 리뷰, PR
+#89)**: `CircuitBreaker.decorateCallable`이 Bulkhead의 `submit`을 감싸는 구조라, 풀과
+큐가 가득 차 `BulkheadFullException`이 나면 그 예외도 그대로 CircuitBreaker에 기록됐다.
+부하가 몰려 거부가 늘면(PG 자체는 멀쩡한데도) 서킷이 열려버리고, 부하가 풀린 뒤의 정상
+요청까지 `CallNotPermittedException`으로 막혀 원본 호출 없이 UNKNOWN이 되는 문제였다 —
+카드 거절이 CircuitBreaker에 안 잡히는 3.2의 원칙과 같은 이유로, `application.yml`의
+`resilience4j.circuitbreaker.instances.mockPg.ignore-exceptions`에
+`BulkheadFullException`을 추가해 실패 집계에서 뺐다. `coreThreadPoolSize=1`,
+`maxThreadPoolSize=1`, `queueCapacity=0`인 서킷에 동시 요청 5건을 쏴서(1건만 실행,
+4건은 즉시 거부) 그 직후의 요청이 여전히 원본 호출까지 도달해 정상 승인되는지로
+증명했다 — `ignoreExceptions` 없이 같은 시나리오를 돌리면 슬라이딩 윈도우가 금방
+임계값을 넘어 이 마지막 요청도 즉시 거부됐을 것이다.
+
+**추가 수정 2 — 큐에서 대기 중인 작업은 `cancel(true)`로 막을 수 없었다(CodeRabbit 리뷰,
+PR #89)**: 3.4에서 인터럽트 시 `future.cancel(true)`를 호출하도록 고쳤을 때는 이게 아직
+실행을 시작하지 않은 작업도 막아줄 거라 생각했다. 3.5로 넘어오면서 이 가정이 깨졌다 —
+`ThreadPoolBulkhead.submit()`은 실제 제출은 내부적으로 만든 별도의 future로 하고, 우리에게
+돌려주는 건 그 결과를 나중에 전달만 받는 새 `CompletableFuture`다. `CompletableFuture`는
+애초에 인터럽트로 처리를 제어하지 않는다는 JDK 계약도 있어(Javadoc), 우리가 들고 있는
+future에 `cancel(true)`를 불러도 큐에 그대로 남아있는 실제 작업은 전혀 영향을 받지 않고
+나중에 실행돼 PG를 호출할 수 있었다 — 이미 UNKNOWN으로 답을 준 요청인데도. 고친 방법은
+제출하는 작업 자체에 "이미 포기했다" 플래그(`AtomicBoolean`)를 심는 것이다 — 아직 큐에서
+대기 중인 작업이라면 PG를 부르기 직전에 그 플래그를 보고 스스로 멈춘다. 실행을 시작해
+블로킹 중인 작업까지는 여전히 못 막는다(3.4의 한계 그대로). 증명은 블랙박스로 했다 —
+용량 2(실행 1 + 대기 1)인 게이트웨이에 "차단용" 요청으로 실행 슬롯을 300ms 채운 뒤,
+"대상" 요청을 큐에 넣자마자 그 호출자를 인터럽트했다. 대기 시간을 충분히 준 다음
+`MockPgClient`로 같은 키를 직접 호출해봤을 때, 그 호출이 300ms 지연을 고스란히 겪고서야
+승인됐다는 사실 자체가 큐에 있던 작업이 실제로는 한 번도 PG를 부르지 않았다는 증거다 —
+만약 불렀다면 MockPgServer의 멱등성 캐시(1.6)에 이미 결과가 있어 직접 호출이 즉시
+끝났을 것이다.

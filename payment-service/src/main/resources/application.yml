@@ -66,6 +66,12 @@ resilience4j:
         failure-rate-threshold: 50
         wait-duration-in-open-state: 10s
         permitted-number-of-calls-in-half-open-state: 3
+        # BulkheadFullException(3.5)은 우리 쪽 스레드풀 용량이 찼다는 뜻이지 PG가 응답을
+        # 못 준다는 증거가 아니다 — 부하가 몰려 거부가 늘어도 실제 PG 상태와 무관하게 서킷이
+        # 열리면 안 되므로 실패 집계에서 뺀다(CodeRabbit 리뷰, PR #89). 카드 거절이 CB에
+        # 안 잡히는 것(3.2)과 같은 이유다.
+        ignore-exceptions:
+          - io.github.resilience4j.bulkhead.BulkheadFullException
 
   retry:
     instances:
