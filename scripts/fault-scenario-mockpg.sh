@@ -114,7 +114,16 @@ cleanup() {
   echo "정리 중 — Mock PG 설정을 기본값으로 되돌립니다"
   mockpg_reset || echo "정리 중 Mock PG 초기화에 실패했습니다 — 다음 실행 전에 수동으로 확인하세요." >&2
 }
-trap cleanup EXIT INT TERM
+# cleanup()을 EXIT/INT/TERM 모두에 그대로 걸면(CodeRabbit 재검토, PR #91)
+# INT/TERM 핸들러가 cleanup()만 실행하고 반환할 때 스크립트가 죽지 않고 인터럽트된
+# 지점 다음 줄부터 계속 실행된다 — Ctrl-C를 눌러도 시나리오가 안 멈추고, 그 다음
+# 단계가 Mock PG에 새 장애 설정을 다시 걸어버려 cleanup()이 되돌린 초기화가 무의미해질
+# 수 있다. EXIT 트랩 하나만 cleanup()을 맡고(정상 종료든 아래 exit로 인한 종료든 bash가
+# 항상 그 직전에 EXIT 트랩을 실행해준다), INT/TERM은 각각 관례적인 종료 코드로 즉시
+# 종료하기만 한다.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # order-service에 주문 하나를 생성한다(성공/실패 모두 이 스크립트 입장에서는 정상
 # 결과다 — 실패/타임아웃을 관찰하는 게 목적이므로 curl 실패 자체를 에러로 취급하지
