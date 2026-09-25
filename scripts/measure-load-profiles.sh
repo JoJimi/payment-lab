@@ -57,6 +57,8 @@ fi
 
 wait_for_app_ready "${ORDER_SERVICE_URL}/actuator/health"
 
+# k6/saga-order-flow.js를 공통 환경변수로 실행한다. profile 뒤에 넘긴 나머지 인자는
+# 그대로 k6 run에 전달되므로, 호출부에서 --summary-export/--out 등을 자유롭게 얹는다.
 run_k6() {
   local profile=$1
   shift
@@ -83,13 +85,20 @@ for i in 1 2 3; do
 done
 
 echo "=== [stress] 0 -> ${STRESS_MAX_VUS} VU 계단식 램프업 ==="
-run_k6 stress --summary-export="benchmarks/raw/stress.json"
+# CodeRabbit 리뷰 — --summary-export는 실행 전체가 끝난 뒤의 집계값 하나만 남긴다.
+# stress/spike는 그 집계값이 아니라 "VU가 바뀌면서 지표가 어떻게 변하는가"라는 시간에
+# 따른 곡선 자체가 보고 싶은 결과이므로, --out json=...으로 요청/지표 단위 원시 데이터
+# 포인트를 같이 남겨야 나중에(3.12) 그 곡선을 복원할 수 있다.
+run_k6 stress --summary-export="benchmarks/raw/stress.json" \
+  --out json="benchmarks/raw/stress-points.json"
 
 echo "=== [spike] ${SPIKE_BASE_VUS} -> ${SPIKE_MAX_VUS} VU 급증/복귀 ==="
-run_k6 spike --summary-export="benchmarks/raw/spike.json"
+run_k6 spike --summary-export="benchmarks/raw/spike.json" \
+  --out json="benchmarks/raw/spike-points.json"
 
 echo ""
 echo "완료. benchmarks/raw/ 에 다음 파일이 생성됨:"
-echo "  smoke.json, load-run{1,2,3}.json, stress.json, spike.json"
+echo "  smoke.json, load-run{1,2,3}.json, stress.json, stress-points.json, spike.json, spike-points.json"
 echo "load-run*.json 3개의 중앙값을 04-saga-comparison.md와 같은 방식으로 기록하고,"
-echo "smoke/stress/spike는 각 1회 실행 결과를 그대로 3.12 벤치마크 리포트에 반영할 것."
+echo "smoke는 1회 실행 결과를, stress/spike는 summary(집계) + points(시간에 따른 원시"
+echo "데이터, VU 변화에 따른 곡선 복원용)를 함께 3.12 벤치마크 리포트에 반영할 것."
