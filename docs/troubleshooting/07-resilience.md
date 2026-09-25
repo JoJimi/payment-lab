@@ -286,6 +286,28 @@ future에 `cancel(true)`를 불러도 큐에 그대로 남아있는 실제 작�
 만약 불렀다면 MockPgServer의 멱등성 캐시(1.6)에 이미 결과가 있어 직접 호출이 즉시
 끝났을 것이다.
 
+**추가 수정 3 — 취소 플래그를 요청 전체에서 공유하면 안 됐다(CodeRabbit 리뷰, PR #89
+3차)**: 추가 수정 2의 `AtomicBoolean` 플래그를 `requestPayment()` 메서드 맨 위에서 한 번만
+만들어 모든 재시도 시도가 공유하게 짰더니 두 가지 문제가 있었다. 첫째, 이 플래그는
+`catch (InterruptedException e)` 경로에서만 세워졌다 — `TimeLimiter` 자신의 타임아웃
+(`TimeoutException` 경로, `TimeLimiterImpl`이 내부적으로 `future.cancel(true)`를 부르는
+경우)으로 시도가 취소될 때는 전혀 세워지지 않아, 그 시도가 여전히 큐에 남아있었다면
+추가 수정 2가 막으려던 문제(취소된 시도가 그래도 PG를 부름)가 TimeLimiter 타임아웃
+경로에서는 재발했다. 둘째, 이 문제를 "그럼 TimeLimiter 타임아웃 때도 플래그를
+세우면 되지 않나" 식으로 단순하게 고치면 새 문제가 생긴다 — 플래그가 요청 전체에서
+하나뿐이라, 시도 1이 타임아웃으로 취소되며 플래그를 세우면 아직 시작도 안 한 시도
+2(다음 재시도)까지 같은 플래그를 보고 "이미 취소됐다"며 PG를 아예 부르지 않고
+넘어가버린다 — 재시도 자체가 무력화된다. 고친 방법은 플래그를 `TimeLimiter.
+decorateFutureSupplier` 람다 안, 즉 시도마다 새로 만드는 것이다(`AtomicBoolean
+attemptCancelled = new AtomicBoolean(false)`) — 그리고 future를 만든 직후
+`future.whenComplete((result, error) -> { if (future.isCancelled()) attemptCancelled.set(true); }
+)`을 등록해, 그 시도의 future가 취소되는 모든 경로(호출자 인터럽트로 인한 명시적
+`future.cancel(true)`든, `TimeLimiterImpl`이 타임아웃으로 내부에서 부르는
+`future.cancel(true)`든)에서 그 시도 자신의 플래그만 세우게 했다. 자바 클로저 의미상
+람다가 호출될 때마다 새 `AtomicBoolean` 인스턴스가 만들어지므로, 한 시도의 취소가 다른
+시도의 플래그를 건드릴 수 없다는 점이 이 수정의 정확성을 보장한다 — 별도의 재현
+테스트 없이도 이 보장 자체가 언어 수준의 성질이라 자명하다고 판단했다.
+
 ### 6. Fallback 설계 — 즉시 실패(UNKNOWN)로 확정하고, 회수는 Saga 타임아웃에 맡긴다 (3.6)
 
 **배경**: 3.1~3.5가 배선한 네 데코레이터(Retry/CircuitBreaker/TimeLimiter/Bulkhead)는

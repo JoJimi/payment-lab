@@ -14,6 +14,7 @@ import io.github.resilience4j.timelimiter.TimeLimiterRegistry;
 import java.math.BigDecimal;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -91,7 +92,10 @@ import org.springframework.stereotype.Component;
  * 처리를 제어하지 않는다(JDK Javadoc). 그래서 {@link #requestPayment}는 대신 제출하는
  * 작업 자체에 "이미 포기했다" 플래그를 심어, 아직 큐에서 대기 중인(실행을 시작하지 않은)
  * 작업이 PG를 호출하기 직전에 스스로 멈추게 한다 — 이미 PG 호출을 시작해 블로킹 중인
- * 작업까지는 여전히 막을 수 없다.
+ * 작업까지는 여전히 막을 수 없다. 이 플래그는 호출자 인터럽트뿐 아니라 {@code TimeLimiter}
+ * 자체의 타임아웃으로 future가 취소될 때도 똑같이 선다({@code future.whenComplete}로
+ * 등록) — 그리고 매 재시도 시도마다 새로 만들어져, 한 시도의 취소가 아직 시작도 안 한
+ * 다음 재시도까지 같이 죽이지 않는다(CodeRabbit 리뷰, PR #89 2차).
  */
 @Component
 public class ResilientMockPgGateway {
@@ -152,17 +156,30 @@ public class ResilientMockPgGateway {
         // PG를 호출하기 직전에 스스로 멈추게 한다 — 이미 PG 호출을 시작해 블로킹 중인
         // 작업까지는 여전히 막을 수 없다(blocking 클라이언트가 인터럽트를 무시하는 3.4의
         // 한계는 그대로 남는다).
-        AtomicBoolean cancelled = new AtomicBoolean(false);
+        //
+        // 이 플래그는 시도(retry attempt)마다 새로 만든다(CodeRabbit 리뷰, PR #89) — 요청
+        // 전체에서 하나만 공유하면, TimeLimiter 자체의 타임아웃(3s, InterruptedException이
+        // 아니라 TimeoutException 경로)으로 한 시도가 취소될 때 그 플래그를 세워버려서, 아직
+        // 시작도 안 한 다음 재시도까지 함께 취소돼버린다. 대신 future.whenComplete로 "이
+        // future가 취소되면(TimeLimiter의 타임아웃이든, 아래 InterruptedException 경로의
+        // future.cancel(true)든) 이 시도의 플래그를 세운다"를 매 시도마다 새로 등록해, 시도
+        // 사이에 플래그가 새지 않게 한다.
         AtomicReference<Future<MockPgResult>> inFlight = new AtomicReference<>();
         Callable<MockPgResult> withTimeLimiter = TimeLimiter.decorateFutureSupplier(timeLimiter, () -> {
-            Future<MockPgResult> future = threadPoolBulkhead
+            AtomicBoolean attemptCancelled = new AtomicBoolean(false);
+            CompletableFuture<MockPgResult> future = threadPoolBulkhead
                     .submit(() -> {
-                        if (cancelled.get()) {
-                            throw new CancellationException("호출자가 이미 포기해 PG를 호출하지 않는다");
+                        if (attemptCancelled.get()) {
+                            throw new CancellationException("이미 취소된 시도라 PG를 호출하지 않는다");
                         }
                         return mockPgClient.requestPayment(idempotencyKey, amount, currency);
                     })
                     .toCompletableFuture();
+            future.whenComplete((result, error) -> {
+                if (future.isCancelled()) {
+                    attemptCancelled.set(true);
+                }
+            });
             inFlight.set(future);
             return future;
         });
@@ -173,9 +190,10 @@ public class ResilientMockPgGateway {
         } catch (MockPgUnavailableException | CallNotPermittedException | TimeoutException | BulkheadFullException e) {
             return MockPgResult.timedOut();
         } catch (InterruptedException e) {
-            cancelled.set(true);
             Future<MockPgResult> future = inFlight.get();
             if (future != null) {
+                // 위 whenComplete 콜백이 이 시도의 attemptCancelled를 세운다 — 아직 큐에서
+                // 대기 중인 작업이라면 PG를 호출하기 전에 스스로 멈춘다.
                 future.cancel(true);
             }
             Thread.currentThread().interrupt();
