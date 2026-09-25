@@ -364,7 +364,11 @@ class ResilientMockPgGatewayTest {
 
     @Test
     void Bulkhead가_거부한_요청은_CircuitBreaker_실패로_집계되지_않아_서킷을_열지_않는다() throws Exception {
-        configureMockPg(0, 0.0, null, false);
+        // 지연을 0으로 두면 첫 요청이 거의 즉시 끝나 실행 슬롯이 곧바로 비고, 나머지 4건이
+        // 아직 Bulkhead에 도달하기도 전에 그 슬롯을 다시 쓸 수 있어 "1건만 승인" 단언이
+        // 흔들릴 수 있다(CodeRabbit 리뷰, PR #89). 300ms로 늘려 첫 요청이 실행 중인 동안
+        // 나머지 4건이 확실히 Bulkhead에 도달하게 한다.
+        configureMockPg(300, 0.0, null, false);
         // core=1/max=1/queue=0: 동시에 딱 1건만 받아준다 — 나머지는 즉시 BulkheadFullException.
         ThreadPoolBulkheadConfig tightBulkhead = ThreadPoolBulkheadConfig.custom()
                 .coreThreadPoolSize(1)
