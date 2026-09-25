@@ -14,9 +14,23 @@ import { Rate, Trend } from 'k6/metrics';
 // 비교할 수 있다(로드맵 2.20 의도, docs/stages/03-service-split-saga.md "다음 단계로
 // 넘기는 숙제" 참고).
 //
+// 3.10 — PROFILE 환경변수로 smoke/load/stress/spike 4개 부하 프로파일을 전환한다.
+// 요청 로직(default function)과 측정 지표는 프로파일과 무관하게 동일하다 — 달라지는
+// 건 오직 k6 executor 설정(VU 수, 램프업 곡선)과 threshold뿐이다. smoke/load는
+// "이 회차가 유효한가"를 확인하는 목적이라 요청 실패를 무관용으로 본다(rate==1).
+// stress/spike는 반대로 "얼마나 버티다 무너지는가"를 관찰하는 게 목적이다 — 여기서
+// 실패가 나오는 건 버그가 아니라 이 프로파일이 보고 싶어하는 신호 그 자체다. threshold를
+// 걸어도 abortOnFail(기본 false)을 켜지 않는 한 실행 중간에 끊기지는 않지만(k6는
+// 끝까지 돌고 나서 종료 코드에만 반영한다), 그 "실패로 끝났다"는 최종 상태 자체가
+// 오염된다 — 이 회차를 자동화 스크립트가 무효로 취급하거나(예: `set -e`가 걸린
+// measure-*.sh 계열) CI에서 실패로 잘못 보고할 수 있다. 그래서 이 두 프로파일은
+// threshold를 아예 걸지 않는다 — 수집된 실패율 자체는 order_success_rate 지표(Rate)로
+// 여전히 확인할 수 있다.
+//
 // 이 세션(Docker 없는 원격 컨테이너)에서는 실행할 수 없다 — order/payment/inventory/
 // notification 4개 서비스 + Kafka + Postgres 3개 + Redis가 전부 로컬에 떠 있어야
-// 한다. 로컬에서 scripts/measure-saga-baseline.sh로 실행할 것.
+// 한다. 로컬에서 scripts/measure-saga-baseline.sh(load) 또는
+// `k6 run --env PROFILE=<smoke|load|stress|spike> k6/saga-order-flow.js`로 실행할 것.
 
 const orderApiDuration = new Trend('order_api_duration', true);
 // CodeRabbit 리뷰(PR #82) — sagaStart를 orderStart와 같게 잡아 "주문 요청 시작부터 Saga
@@ -30,20 +44,68 @@ const sagaCompletionDuration = new Trend('saga_completion_duration', true);
 // 자체가 실패하게 한다.
 const orderSuccessRate = new Rate('order_success_rate');
 
+// 3.10 — VU 상한은 로컬 1대짜리 개발 머신(Docker Compose로 Kafka/Postgres 3개/Redis를
+// 함께 띄운 환경) 기준으로 잡은 기본값이다. 실제로 어디서 무너지는지는 환경마다 다르므로
+// 필요하면 STRESS_MAX_VUS/SPIKE_MAX_VUS로 조정할 것.
+const STRESS_MAX_VUS = Number(__ENV.STRESS_MAX_VUS || 200);
+const SPIKE_BASE_VUS = Number(__ENV.SPIKE_BASE_VUS || 10);
+const SPIKE_MAX_VUS = Number(__ENV.SPIKE_MAX_VUS || 300);
+
+const LOAD_PROFILES = {
+  // smoke — "이 스크립트/환경이 최소한 정상 작동하는가"만 확인한다. VU 1개로 짧게.
+  smoke: {
+    executor: 'constant-vus',
+    vus: 1,
+    duration: '30s',
+  },
+  // load — 정상 예상 부하를 일정하게 유지. 기존 2.20/3.6 베이스라인 비교와 동일한 형태
+  // (VUS/DURATION 환경변수 그대로 유지 — 하위 호환).
+  load: {
+    executor: 'constant-vus',
+    vus: Number(__ENV.VUS || 20),
+    duration: __ENV.DURATION || '60s',
+  },
+  // stress — 정상 용량을 넘어서까지 VU를 계단식으로 올려 어디서 무너지는지 찾는다.
+  stress: {
+    executor: 'ramping-vus',
+    startVUs: 0,
+    stages: [
+      { duration: '1m', target: Math.round(STRESS_MAX_VUS * 0.25) },
+      { duration: '2m', target: Math.round(STRESS_MAX_VUS * 0.5) },
+      { duration: '2m', target: STRESS_MAX_VUS },
+      { duration: '1m', target: 0 },
+    ],
+  },
+  // spike — 평상시 부하에서 급격히 치솟았다가 다시 가라앉는 트래픽(이벤트성 프로모션 등)을
+  // 흉내낸다. 급격한 유입/이탈에 대한 회복력(서킷/Bulkhead가 실제로 방어하는지)이 관심사다.
+  spike: {
+    executor: 'ramping-vus',
+    startVUs: 0,
+    stages: [
+      { duration: '10s', target: SPIKE_BASE_VUS },
+      { duration: '10s', target: SPIKE_MAX_VUS },
+      { duration: '30s', target: SPIKE_MAX_VUS },
+      { duration: '10s', target: SPIKE_BASE_VUS },
+      { duration: '20s', target: 0 },
+    ],
+  },
+};
+
+const PROFILE = __ENV.PROFILE || 'load';
+if (!LOAD_PROFILES[PROFILE]) {
+  throw new Error(`알 수 없는 PROFILE: "${PROFILE}" — smoke/load/stress/spike 중 하나여야 합니다.`);
+}
+
 export const options = {
   scenarios: {
-    order_saga: {
-      executor: 'constant-vus',
-      vus: Number(__ENV.VUS || 20),
-      duration: __ENV.DURATION || '60s',
-    },
+    order_saga: LOAD_PROFILES[PROFILE],
   },
   thresholds: {
     // CodeRabbit 리뷰(PR #82) — rate>0.99는 1% 실패를 허용해버려서 "주문 생성 실패가
     // 있는 회차를 성공으로 처리하지 않기"라는 원래 요구를 완전히 만족하지 못한다.
-    // 성능 베이스라인 측정은 요청 하나라도 실패하면 그 회차 자체가 무효이므로 rate==1로
-    // 무관용(zero-tolerance)으로 건다.
-    order_success_rate: ['rate==1'],
+    // 성능 베이스라인 측정(smoke/load)은 요청 하나라도 실패하면 그 회차 자체가 무효이므로
+    // rate==1로 무관용(zero-tolerance)으로 건다. stress/spike는 위 주석 참고 — 걸지 않는다.
+    ...(PROFILE === 'smoke' || PROFILE === 'load' ? { order_success_rate: ['rate==1'] } : {}),
   },
 };
 
