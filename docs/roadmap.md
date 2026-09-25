@@ -346,7 +346,7 @@ CodeRabbit은 **GitHub App**이라 Actions 워크플로가 필요 없습니다. 
 - [x] **3.3** Retry — 지수 백오프 + Jitter. **재시도가 안전한 요청인지(멱등한지) 먼저 확인**하고 적용
 - [x] **3.4** TimeLimiter — PG 응답 타임아웃. 타임아웃된 결제의 상태는 `UNKNOWN`이지 `FAILED`가 아닙니다. 이 구분이 실무에서 가장 자주 사고 나는 지점입니다.
 - [x] **3.5** Bulkhead — PG 호출 스레드풀 격리
-- [ ] **3.6** Fallback 설계 — 서킷 OPEN일 때 결제를 어떻게 처리할지. 즉시 실패 vs 큐잉 후 지연 처리. Saga 타임아웃 로직과 연계되어야 합니다.
+- [x] **3.6** Fallback 설계 — 서킷 OPEN일 때 결제를 어떻게 처리할지. 즉시 실패 vs 큐잉 후 지연 처리. Saga 타임아웃 로직과 연계되어야 합니다.
   - `register-health-indicator: false`는 0단계에서 이미 설정됨. 서킷 OPEN이 `/actuator/health`를 DOWN으로 만들면 5단계 readiness probe에서 **외부 장애 때 내 파드가 빠집니다.**
 
 **3-B. 장애 시나리오**
