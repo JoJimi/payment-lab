@@ -165,7 +165,12 @@ scenario_gradual_latency() {
     generate_load 15
   done
   phase "gradual-latency: 정상 구간으로 복귀"
-  mockpg_reset
+  # 여기서 mockpg_reset이 실패하면 방금까지의 장애 설정(delayMs=5000)이 그대로 남은
+  # 채로 "정상 구간" generate_load가 돌아버려 로그와 실제 상태가 어긋난다(CodeRabbit
+  # 리뷰, PR #91). set -e를 쓰지 않는 스크립트라 그대로 두면 "완료"까지 출력하고
+  # 끝나버릴 수 있어 실패를 명시적으로 전파한다 — EXIT 트랩의 cleanup()은 그대로
+  # 최선 시도(best-effort)로 남겨둔다.
+  mockpg_reset || exit 1
   generate_load 15
 }
 
@@ -178,7 +183,7 @@ scenario_intermittent_failure() {
     generate_load 15
   done
   phase "intermittent-failure: 정상 구간으로 복귀 (HALF_OPEN -> CLOSED 관찰)"
-  mockpg_reset
+  mockpg_reset || exit 1
   generate_load 20
 }
 
@@ -187,7 +192,7 @@ scenario_complete_down() {
   mockpg_config 0 0.0 null true
   generate_load 30
   phase "complete-down: 정상 구간으로 복귀"
-  mockpg_reset
+  mockpg_reset || exit 1
   generate_load 15
 }
 
