@@ -354,7 +354,8 @@ CodeRabbit은 **GitHub App**이라 Actions 워크플로가 필요 없습니다. 
   - `scripts/fault-scenario-mockpg.sh` (PR #91). 로컬에서 `gradual-latency` 시나리오 실행 검증 완료 — delayMs 0→5000 전 구간에서 order-service `POST /api/orders`가 전부 201, 정상 구간 복귀 및 cleanup까지 에러 없이 완료.
 - [x] **3.8** 각 시나리오에서 서킷 상태 전이(CLOSED→OPEN→HALF_OPEN→CLOSED)를 Grafana에서 관찰하고 캡처
   - `complete-down` 시나리오로 로컬에서 CLOSED→OPEN→HALF_OPEN→CLOSED 풀 사이클 캡처 완료. 상세 기록: `docs/troubleshooting/07-resilience.md` 7절.
-- [ ] **3.9** **방어 로직 없는 버전과 비교** — PG가 5초 지연될 때 방어 없으면 커넥션 풀이 고갈되어 전체가 멈추는 걸 재현. 이게 3단계의 하이라이트입니다.
+- [x] **3.9** **방어 로직 없는 버전과 비교** — PG가 5초 지연될 때 방어 없으면 커넥션 풀이 고갈되어 전체가 멈추는 걸 재현. 이게 3단계의 하이라이트입니다.
+  - 임시 로컬 브랜치(병합 안 함)에서 재현. 커넥션 풀이 아니라 Kafka 리스너 스레드(concurrency=1)가 고갈됨 — 주문 10건이 완전 직렬화되어 평균 9.37초/건, 총 93.7초 소요(정상 시 0.05~1.1초). 상세: `docs/troubleshooting/07-resilience.md` 8절.
 
 **3-C. 성능 측정**
 - [ ] **3.10** k6 시나리오 4종 — smoke / load / stress / spike
