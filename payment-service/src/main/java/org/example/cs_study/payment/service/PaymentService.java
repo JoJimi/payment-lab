@@ -96,7 +96,21 @@ public class PaymentService {
     private PaymentResponse doRequestPayment(String idempotencyKey, RequestPaymentRequest request) {
         Long paymentId = savePending(idempotencyKey, request);
         MockPgResult result = mockPgGateway.requestPayment(idempotencyKey, request.amount(), request.currency());
-        return applyResult(paymentId, result);
+        // mockPgGateway가 대기 중 인터럽트를 받으면 UNKNOWN(TIMEOUT)을 반환하면서 인터럽트
+        // 상태를 복원해둔다(CodeRabbit 리뷰, PR #88). 그 상태 그대로 applyResult의 트랜잭션에
+        // 들어가면 payment.markUnknown()에 닿기도 전에 트랜잭션 자체가 실패할 수 있다 — 이미
+        // PENDING으로 저장된 결제가 그대로 PENDING에 갇히는, 애초에 고치려던 것과 같은 문제가
+        // 한 단계 위에서 재발한다. applyResult 동안만 인터럽트 상태를 지워 이 결정적 갱신을
+        // 방해하지 않게 하고, 끝나면 그대로 복원해 호출자(스레드풀/프레임워크)가 인터럽트
+        // 요청 자체를 놓치지 않게 한다.
+        boolean interrupted = Thread.interrupted();
+        try {
+            return applyResult(paymentId, result);
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     private static boolean isActiveOrderConflict(DataIntegrityViolationException e) {
