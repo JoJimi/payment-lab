@@ -209,3 +209,101 @@ mockPgClient.requestPayment(...))`)가 그 역할을 한다.
 
 **아직 손대지 않은 것**: PG 호출 전용 스레드풀의 크기 제한과 거부 정책, 그리고 그
 스레드풀이 다른 작업과 자원을 다투지 않도록 격리하는 것은 3.5(Bulkhead)에서 이어간다.
+
+### 5. Bulkhead 배선 — 무제한 스레드풀을 제한된 크기로 격리한다 (3.5)
+
+**배경**: 3.4는 `TimeLimiter`가 요구하는 `Future`를 만들려고 `ResilientMockPgGateway`가
+직접 관리하는 `Executors.newCachedThreadPool()`을 썼다. 3.4 문서에 이미 적어뒀듯 이건
+"임시 조치"였다 — PG가 느려지면 이 풀은 한도 없이 스레드를 늘려가며 다른 작업의 CPU/메모리를
+잠식할 수 있는 상태였다. 3.1이 정한 순서(Retry → CircuitBreaker → TimeLimiter → Bulkhead)의
+마지막 조각을 채운다.
+
+**결정**: 수작업 `ExecutorService`를 Resilience4j의 `ThreadPoolBulkhead`로 교체했다 —
+`resilience4j.thread-pool-bulkhead.instances.mockPg`(`core-thread-pool-size: 4`,
+`max-thread-pool-size: 8`, `queue-capacity: 8`)로 크기를 명시적으로 제한한다. core/max
+스레드와 큐가 모두 찬 상태에서 새 요청이 오면 `ThreadPoolBulkhead.submit`이 스레드도 큐도
+쓰지 않고 그 자리에서 `BulkheadFullException`을 던진다(동기적으로 — 내부적으로
+`RejectedExecutionException`을 잡아 변환한다는 것을 `FixedThreadPoolBulkhead` 바이트코드로
+확인했다). 이 예외도 `MockPgUnavailableException`/`TimeoutException`과 동일하게 취급한다 —
+재시도 대상(서킷 상태 확인 포함, 3.3)이고 최종적으로 `MockPgResult.timedOut()`(UNKNOWN)으로
+번역된다. PG 자체는 멀쩡해도 우리 쪽 처리 능력이 바닥났다는 것 역시 "승인/거절을 확정할 수
+없다"는 뜻이기 때문이다.
+
+**함정 — `ThreadPoolBulkhead.decorateCallable`은 쓸 수 없었다**: 처음엔 다른 데코레이터들과
+통일된 스타일로 `ThreadPoolBulkhead.decorateCallable(bulkhead, callable)`을 쓰려 했다.
+그런데 이 정적 메서드는 `Supplier<CompletionStage<T>>`를 반환한다 — `TimeLimiter`가
+요구하는 `Supplier<Future<T>>`와 호환되지 않는다(`CompletionStage`는 `Future`를 확장하지
+않는다). 대신 인터페이스에 있는 인스턴스 메서드 `threadPoolBulkhead.submit(Callable<T>)`를
+직접 쓰고 그 반환값(선언 타입은 `CompletionStage<T>`이지만 실제로는 `CompletableFuture`)에
+`.toCompletableFuture()`를 호출해 `Future<T>` 계약을 만족시켰다. `javap`으로
+`ThreadPoolBulkhead` 인터페이스와 그 구현체(`FixedThreadPoolBulkhead`)의 바이트코드를 직접
+비교하고 나서야 이 차이를 확인했다 — 구현체에는 `CompletableFuture`를 직접 반환하는
+오버로드도 있지만, 인터페이스 타입으로 참조하는 한 그 오버로드는 보이지 않는다.
+
+**증명 — 동시 PG 호출이 스레드풀 용량을 넘으면 초과분은 BulkheadFullException으로 즉시
+거부된다**: `coreThreadPoolSize=1`, `maxThreadPoolSize=1`, `queueCapacity=1`로 좁혀
+동시에 받아줄 수 있는 요청을 딱 2건(실행 중 1 + 대기 1)으로 제한했다. PG 응답을 300ms
+지연시키고(정상 처리, 장애 아님) `CountDownLatch`로 3개의 요청을 동시에 쏜 뒤 결과를
+모았다 — 2건은 APPROVED(하나는 즉시 실행, 하나는 큐에서 잠깐 기다렸다가 실행), 1건은
+TIMEOUT(BulkheadFullException으로 즉시 거부)이었다. 5회 반복 실행으로 타이밍에 따른
+플레이키니스가 없음을 확인했다.
+
+**한계 — 여전히 남은 것**: Bulkhead는 "동시에 몇 건까지 받아줄지"의 상한일 뿐, 3.4가 남긴
+근본적인 한계(blocking HTTP 클라이언트가 인터럽트에 응답하지 않아 타임아웃 이후에도 소켓을
+붙들고 있을 수 있다는 것) 자체를 없애지는 못한다. 다만 이제 그 "붙들려 있는" 스레드의
+개수에 확실한 상한이 생겼다는 점이 3.4와의 차이다 — 전에는 무제한으로 늘어날 수 있었다.
+Fallback 설계(서킷이 OPEN이거나 Bulkhead가 가득 찼을 때 무엇을 돌려줄지)는 3.6에서
+이어간다.
+
+**추가 수정 1 — Bulkhead 거부가 CircuitBreaker 실패로 잘못 잡혔다(CodeRabbit 리뷰, PR
+#89)**: `CircuitBreaker.decorateCallable`이 Bulkhead의 `submit`을 감싸는 구조라, 풀과
+큐가 가득 차 `BulkheadFullException`이 나면 그 예외도 그대로 CircuitBreaker에 기록됐다.
+부하가 몰려 거부가 늘면(PG 자체는 멀쩡한데도) 서킷이 열려버리고, 부하가 풀린 뒤의 정상
+요청까지 `CallNotPermittedException`으로 막혀 원본 호출 없이 UNKNOWN이 되는 문제였다 —
+카드 거절이 CircuitBreaker에 안 잡히는 3.2의 원칙과 같은 이유로, `application.yml`의
+`resilience4j.circuitbreaker.instances.mockPg.ignore-exceptions`에
+`BulkheadFullException`을 추가해 실패 집계에서 뺐다. `coreThreadPoolSize=1`,
+`maxThreadPoolSize=1`, `queueCapacity=0`인 서킷에 동시 요청 5건을 쏴서(1건만 실행,
+4건은 즉시 거부) 그 직후의 요청이 여전히 원본 호출까지 도달해 정상 승인되는지로
+증명했다 — `ignoreExceptions` 없이 같은 시나리오를 돌리면 슬라이딩 윈도우가 금방
+임계값을 넘어 이 마지막 요청도 즉시 거부됐을 것이다.
+
+**추가 수정 2 — 큐에서 대기 중인 작업은 `cancel(true)`로 막을 수 없었다(CodeRabbit 리뷰,
+PR #89)**: 3.4에서 인터럽트 시 `future.cancel(true)`를 호출하도록 고쳤을 때는 이게 아직
+실행을 시작하지 않은 작업도 막아줄 거라 생각했다. 3.5로 넘어오면서 이 가정이 깨졌다 —
+`ThreadPoolBulkhead.submit()`은 실제 제출은 내부적으로 만든 별도의 future로 하고, 우리에게
+돌려주는 건 그 결과를 나중에 전달만 받는 새 `CompletableFuture`다. `CompletableFuture`는
+애초에 인터럽트로 처리를 제어하지 않는다는 JDK 계약도 있어(Javadoc), 우리가 들고 있는
+future에 `cancel(true)`를 불러도 큐에 그대로 남아있는 실제 작업은 전혀 영향을 받지 않고
+나중에 실행돼 PG를 호출할 수 있었다 — 이미 UNKNOWN으로 답을 준 요청인데도. 고친 방법은
+제출하는 작업 자체에 "이미 포기했다" 플래그(`AtomicBoolean`)를 심는 것이다 — 아직 큐에서
+대기 중인 작업이라면 PG를 부르기 직전에 그 플래그를 보고 스스로 멈춘다. 실행을 시작해
+블로킹 중인 작업까지는 여전히 못 막는다(3.4의 한계 그대로). 증명은 블랙박스로 했다 —
+용량 2(실행 1 + 대기 1)인 게이트웨이에 "차단용" 요청으로 실행 슬롯을 300ms 채운 뒤,
+"대상" 요청을 큐에 넣자마자 그 호출자를 인터럽트했다. 대기 시간을 충분히 준 다음
+`MockPgClient`로 같은 키를 직접 호출해봤을 때, 그 호출이 300ms 지연을 고스란히 겪고서야
+승인됐다는 사실 자체가 큐에 있던 작업이 실제로는 한 번도 PG를 부르지 않았다는 증거다 —
+만약 불렀다면 MockPgServer의 멱등성 캐시(1.6)에 이미 결과가 있어 직접 호출이 즉시
+끝났을 것이다.
+
+**추가 수정 3 — 취소 플래그를 요청 전체에서 공유하면 안 됐다(CodeRabbit 리뷰, PR #89
+3차)**: 추가 수정 2의 `AtomicBoolean` 플래그를 `requestPayment()` 메서드 맨 위에서 한 번만
+만들어 모든 재시도 시도가 공유하게 짰더니 두 가지 문제가 있었다. 첫째, 이 플래그는
+`catch (InterruptedException e)` 경로에서만 세워졌다 — `TimeLimiter` 자신의 타임아웃
+(`TimeoutException` 경로, `TimeLimiterImpl`이 내부적으로 `future.cancel(true)`를 부르는
+경우)으로 시도가 취소될 때는 전혀 세워지지 않아, 그 시도가 여전히 큐에 남아있었다면
+추가 수정 2가 막으려던 문제(취소된 시도가 그래도 PG를 부름)가 TimeLimiter 타임아웃
+경로에서는 재발했다. 둘째, 이 문제를 "그럼 TimeLimiter 타임아웃 때도 플래그를
+세우면 되지 않나" 식으로 단순하게 고치면 새 문제가 생긴다 — 플래그가 요청 전체에서
+하나뿐이라, 시도 1이 타임아웃으로 취소되며 플래그를 세우면 아직 시작도 안 한 시도
+2(다음 재시도)까지 같은 플래그를 보고 "이미 취소됐다"며 PG를 아예 부르지 않고
+넘어가버린다 — 재시도 자체가 무력화된다. 고친 방법은 플래그를 `TimeLimiter.
+decorateFutureSupplier` 람다 안, 즉 시도마다 새로 만드는 것이다(`AtomicBoolean
+attemptCancelled = new AtomicBoolean(false)`) — 그리고 future를 만든 직후
+`future.whenComplete((result, error) -> { if (future.isCancelled()) attemptCancelled.set(true); }
+)`을 등록해, 그 시도의 future가 취소되는 모든 경로(호출자 인터럽트로 인한 명시적
+`future.cancel(true)`든, `TimeLimiterImpl`이 타임아웃으로 내부에서 부르는
+`future.cancel(true)`든)에서 그 시도 자신의 플래그만 세우게 했다. 자바 클로저 의미상
+람다가 호출될 때마다 새 `AtomicBoolean` 인스턴스가 만들어지므로, 한 시도의 취소가 다른
+시도의 플래그를 건드릴 수 없다는 점이 이 수정의 정확성을 보장한다 — 별도의 재현
+테스트 없이도 이 보장 자체가 언어 수준의 성질이라 자명하다고 판단했다.

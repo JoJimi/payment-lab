@@ -66,6 +66,12 @@ resilience4j:
         failure-rate-threshold: 50
         wait-duration-in-open-state: 10s
         permitted-number-of-calls-in-half-open-state: 3
+        # BulkheadFullException(3.5)은 우리 쪽 스레드풀 용량이 찼다는 뜻이지 PG가 응답을
+        # 못 준다는 증거가 아니다 — 부하가 몰려 거부가 늘어도 실제 PG 상태와 무관하게 서킷이
+        # 열리면 안 되므로 실패 집계에서 뺀다(CodeRabbit 리뷰, PR #89). 카드 거절이 CB에
+        # 안 잡히는 것(3.2)과 같은 이유다.
+        ignore-exceptions:
+          - io.github.resilience4j.bulkhead.BulkheadFullException
 
   retry:
     instances:
@@ -89,6 +95,18 @@ resilience4j:
     instances:
       mockPg:
         timeout-duration: 3s
+
+  thread-pool-bulkhead:
+    instances:
+      mockPg:
+        # PG 호출 전용 스레드풀을 무제한 newCachedThreadPool(3.4)에서 이걸로 교체한다(3.5).
+        # core/max를 좁게 잡아 PG가 느려져도 이 스레드풀이 다른 작업의 자원을 다 잡아먹지
+        # 못하게 막고, core를 넘는 요청은 큐(queue-capacity)에서 잠깐 기다리게 하되 그마저
+        # 넘치면 BulkheadFullException으로 즉시 거부해 대기 자체를 없앤다.
+        core-thread-pool-size: 4
+        max-thread-pool-size: 8
+        queue-capacity: 8
+        keep-alive-duration: 20ms
 
 logging:
   level:
