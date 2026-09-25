@@ -358,7 +358,8 @@ CodeRabbit은 **GitHub App**이라 Actions 워크플로가 필요 없습니다. 
   - 임시 로컬 브랜치(병합 안 함)에서 재현. 커넥션 풀이 아니라 Kafka 리스너 스레드(concurrency=1)가 고갈됨 — 주문 10건이 완전 직렬화되어 평균 9.37초/건, 총 93.7초 소요(정상 시 0.05~1.1초). 상세: `docs/troubleshooting/07-resilience.md` 8절.
 
 **3-C. 성능 측정**
-- [ ] **3.10** k6 시나리오 4종 — smoke / load / stress / spike
+- [x] **3.10** k6 시나리오 4종 — smoke / load / stress / spike
+  - `k6/saga-order-flow.js`의 `PROFILE` 환경변수로 전환. 로컬에서 4개 전부 실행 검증 완료 — smoke(VU 1)는 정상(Saga 완료 평균 10.46초), load(VU 20)부터 주문 생성 API 자체가 평균 6.74초로 느려지고 Saga 완료가 POLL_TIMEOUT_MS(15초) 안에 못 끝남. 로컬 1대에 4서비스+Kafka+Postgres 3개+Redis를 다 띄운 환경의 자원 한계로 보이며, 원인 분석은 3.12(벤치마크 리포트)로 넘김.
 - [ ] **3.11** 측정 자동화 — 스크립트 한 번으로 결과가 파일로 떨어지게
 - [ ] **3.12** **종합 벤치마크 리포트 작성**
   - 락 전략별 (1단계 재측정) / 캐시 유무별 / 모놀리식 vs MSA / 서킷 유무별
