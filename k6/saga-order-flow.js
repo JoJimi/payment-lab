@@ -18,9 +18,14 @@ import { Rate, Trend } from 'k6/metrics';
 // 요청 로직(default function)과 측정 지표는 프로파일과 무관하게 동일하다 — 달라지는
 // 건 오직 k6 executor 설정(VU 수, 램프업 곡선)과 threshold뿐이다. smoke/load는
 // "이 회차가 유효한가"를 확인하는 목적이라 요청 실패를 무관용으로 본다(rate==1).
-// stress/spike는 반대로 "얼마나 버티다 무너지는가"를 관찰하는 게 목적이라, 첫 실패에
-// k6 실행 자체가 죽어버리면 정작 보고 싶은 붕괴 구간의 데이터를 못 모은다 — 이 두
-// 프로파일은 threshold를 걸지 않는다.
+// stress/spike는 반대로 "얼마나 버티다 무너지는가"를 관찰하는 게 목적이다 — 여기서
+// 실패가 나오는 건 버그가 아니라 이 프로파일이 보고 싶어하는 신호 그 자체다. threshold를
+// 걸어도 abortOnFail(기본 false)을 켜지 않는 한 실행 중간에 끊기지는 않지만(k6는
+// 끝까지 돌고 나서 종료 코드에만 반영한다), 그 "실패로 끝났다"는 최종 상태 자체가
+// 오염된다 — 이 회차를 자동화 스크립트가 무효로 취급하거나(예: `set -e`가 걸린
+// measure-*.sh 계열) CI에서 실패로 잘못 보고할 수 있다. 그래서 이 두 프로파일은
+// threshold를 아예 걸지 않는다 — 수집된 실패율 자체는 order_success_rate 지표(Rate)로
+// 여전히 확인할 수 있다.
 //
 // 이 세션(Docker 없는 원격 컨테이너)에서는 실행할 수 없다 — order/payment/inventory/
 // notification 4개 서비스 + Kafka + Postgres 3개 + Redis가 전부 로컬에 떠 있어야
