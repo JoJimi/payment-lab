@@ -360,7 +360,8 @@ CodeRabbit은 **GitHub App**이라 Actions 워크플로가 필요 없습니다. 
 **3-C. 성능 측정**
 - [x] **3.10** k6 시나리오 4종 — smoke / load / stress / spike
   - `k6/saga-order-flow.js`의 `PROFILE` 환경변수로 전환. 로컬에서 4개 전부 실행 검증 완료 — smoke(VU 1)는 정상(Saga 완료 평균 10.46초), load(VU 20)부터 주문 생성 API 자체가 평균 6.74초로 느려지고 Saga 완료가 POLL_TIMEOUT_MS(15초) 안에 못 끝남. 로컬 1대에 4서비스+Kafka+Postgres 3개+Redis를 다 띄운 환경의 자원 한계로 보이며, 원인 분석은 3.12(벤치마크 리포트)로 넘김.
-- [ ] **3.11** 측정 자동화 — 스크립트 한 번으로 결과가 파일로 떨어지게
+- [x] **3.11** 측정 자동화 — 스크립트 한 번으로 결과가 파일로 떨어지게
+  - `scripts/measure-load-profiles.sh` (PR #95). 로컬에서 전체 실행 검증 완료 — `benchmarks/raw/`에 `smoke.json`, `load-run{1,2,3}.json`, `stress.json`, `stress-points.json`, `spike.json`, `spike-points.json` 7개 전부 생성 확인.
 - [ ] **3.12** **종합 벤치마크 리포트 작성**
   - 락 전략별 (1단계 재측정) / 캐시 유무별 / 모놀리식 vs MSA / 서킷 유무별
   - 각각 TPS / p50 / p95 / p99 / 에러율
