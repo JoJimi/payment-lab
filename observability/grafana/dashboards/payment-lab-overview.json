@@ -15,8 +15,8 @@
       "datasource": { "type": "prometheus", "uid": "Prometheus" },
       "targets": [
         {
-          "expr": "sum(rate(http_server_requests_seconds_count{job=\"payment-lab\"}[1m])) by (uri)",
-          "legendFormat": "{{uri}}"
+          "expr": "sum(rate(http_server_requests_seconds_count[1m])) by (job, uri)",
+          "legendFormat": "{{job}} {{uri}}"
         }
       ]
     },
@@ -29,8 +29,8 @@
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(http_server_requests_seconds_bucket{job=\"payment-lab\"}[5m])) by (le, uri))",
-          "legendFormat": "{{uri}} p95"
+          "expr": "histogram_quantile(0.95, sum(rate(http_server_requests_seconds_bucket[5m])) by (le, job, uri))",
+          "legendFormat": "{{job}} {{uri}} p95"
         }
       ]
     },
@@ -42,7 +42,7 @@
       "datasource": { "type": "prometheus", "uid": "Prometheus" },
       "targets": [
         {
-          "expr": "sum(rate(payment_result_total{job=\"payment-lab\"}[1m])) by (status)",
+          "expr": "sum(rate(payment_result_total{job=\"payment-service\"}[1m])) by (status)",
           "legendFormat": "{{status}}"
         }
       ]
@@ -55,7 +55,7 @@
       "datasource": { "type": "prometheus", "uid": "Prometheus" },
       "targets": [
         {
-          "expr": "sum(rate(idempotency_requests_total{job=\"payment-lab\"}[1m])) by (result)",
+          "expr": "sum(rate(idempotency_requests_total{job=\"payment-service\"}[1m])) by (result)",
           "legendFormat": "{{result}}"
         }
       ]
@@ -69,8 +69,26 @@
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
       "targets": [
         {
-          "expr": "1000 * sum(rate(inventory_lock_wait_seconds_sum{job=\"payment-lab\"}[1m])) by (strategy) / sum(rate(inventory_lock_wait_seconds_count{job=\"payment-lab\"}[1m])) by (strategy)",
+          "expr": "1000 * sum(rate(inventory_lock_wait_seconds_sum{job=\"inventory-service\"}[1m])) by (strategy) / sum(rate(inventory_lock_wait_seconds_count{job=\"inventory-service\"}[1m])) by (strategy)",
           "legendFormat": "{{strategy}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "3.8 — 서킷 상태 전이 (mockPg)",
+      "type": "state-timeline",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "mappings": [] },
+        "overrides": []
+      },
+      "options": { "mergeValues": true, "showValue": "always" },
+      "targets": [
+        {
+          "expr": "resilience4j_circuitbreaker_state{name=\"mockPg\", job=\"payment-service\"} > 0",
+          "legendFormat": "{{state}}"
         }
       ]
     }

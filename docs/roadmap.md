@@ -350,7 +350,8 @@ CodeRabbit은 **GitHub App**이라 Actions 워크플로가 필요 없습니다. 
   - `register-health-indicator: false`는 0단계에서 이미 설정됨. 서킷 OPEN이 `/actuator/health`를 DOWN으로 만들면 5단계 readiness probe에서 **외부 장애 때 내 파드가 빠집니다.**
 
 **3-B. 장애 시나리오**
-- [ ] **3.7** Mock PG 장애 시나리오 스크립트 — 점진적 지연 증가 / 간헐적 실패 / 완전 다운 / 느린 복구
+- [x] **3.7** Mock PG 장애 시나리오 스크립트 — 점진적 지연 증가 / 간헐적 실패 / 완전 다운 / 느린 복구
+  - `scripts/fault-scenario-mockpg.sh` (PR #91). 로컬에서 `gradual-latency` 시나리오 실행 검증 완료 — delayMs 0→5000 전 구간에서 order-service `POST /api/orders`가 전부 201, 정상 구간 복귀 및 cleanup까지 에러 없이 완료.
 - [ ] **3.8** 각 시나리오에서 서킷 상태 전이(CLOSED→OPEN→HALF_OPEN→CLOSED)를 Grafana에서 관찰하고 캡처
 - [ ] **3.9** **방어 로직 없는 버전과 비교** — PG가 5초 지연될 때 방어 없으면 커넥션 풀이 고갈되어 전체가 멈추는 걸 재현. 이게 3단계의 하이라이트입니다.
 
