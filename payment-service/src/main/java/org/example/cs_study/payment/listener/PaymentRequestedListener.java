@@ -1,10 +1,13 @@
 package org.example.cs_study.payment.listener;
 
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.example.cs_study.event.EventEnvelope;
 import org.example.cs_study.event.EventEnvelopeReader;
 import org.example.cs_study.event.TraceContext;
 import org.example.cs_study.event.payload.PaymentRequestedPayload;
 import org.example.cs_study.payment.dto.request.RequestPaymentRequest;
+import org.example.cs_study.payment.dto.response.PaymentResponse;
 import org.example.cs_study.payment.service.PaymentService;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
@@ -25,16 +28,24 @@ import tools.jackson.databind.ObjectMapper;
  * 배달해도 {@code @Idempotent} AOP(1단계, 부록 A-1)가 정확히 같은 키로 막아준다 — 이
  * 메커니즘이 이미 "긴 흐름 중간에 외부 I/O가 끼는" 케이스를 위해 만들어졌으므로, 별도
  * Inbox 보호가 필요 없다.
+ *
+ * <p><b>3.13:</b> 이 리스너가 메시지를 받아 처리를 끝내기까지 걸린 시간을 PAYMENT 스텝의
+ * 소요시간으로 기록한다({@code saga.step.duration}, Grafana "Saga 단계별 소요시간" 패널).
+ * {@code inbox}를 거치지 않는 이 리스너의 특수성(위 Javadoc) 때문에 다른 세 리스너와 달리
+ * 재전달을 걸러낼 지점이 없다 — 재전달돼도 매번 새로 측정된다(멱등키 자체는
+ * {@code @Idempotent}가 여전히 막아주므로 이중 결제 위험은 없다, 시간만 다시 잰다).
  */
 @Component
 public class PaymentRequestedListener {
 
     private final ObjectMapper objectMapper;
     private final PaymentService paymentService;
+    private final MeterRegistry meterRegistry;
 
-    public PaymentRequestedListener(ObjectMapper objectMapper, PaymentService paymentService) {
+    public PaymentRequestedListener(ObjectMapper objectMapper, PaymentService paymentService, MeterRegistry meterRegistry) {
         this.objectMapper = objectMapper;
         this.paymentService = paymentService;
+        this.meterRegistry = meterRegistry;
     }
 
     @KafkaListener(topics = "payment.requested")
@@ -44,7 +55,14 @@ public class PaymentRequestedListener {
         try (var ignored = TraceContext.restore(envelope.traceId())) {
             PaymentRequestedPayload payload = envelope.payload();
             RequestPaymentRequest request = new RequestPaymentRequest(payload.orderId(), payload.amount(), payload.currency());
-            paymentService.requestPaymentFromSaga(payload.idempotencyKey(), request);
+            Timer.Sample sample = Timer.start(meterRegistry);
+            String outcome = "ERROR";
+            try {
+                PaymentResponse response = paymentService.requestPaymentFromSaga(payload.idempotencyKey(), request);
+                outcome = response.status().name();
+            } finally {
+                sample.stop(meterRegistry.timer("saga.step.duration", "step", "PAYMENT", "outcome", outcome));
+            }
         }
     }
 }
