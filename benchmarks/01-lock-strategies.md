@@ -25,6 +25,8 @@ set -a && source ./.env && set +a
 
 > 이 세션은 Docker가 없는 원격 컨테이너라 실제 수치를 측정할 수 없다. 아래는 채워야 할
 > 표의 틀이다. `benchmarks/raw/<전략>-run<N>.json`(k6 summary export, 3회)의 중앙값을 읽어 채운다.
+> `실패율(5xx)`은 `http_req_failed`가 아니라 각 summary의 `server_error_rate.rate`를 쓴다 —
+> 재고가 소진되면 정상 응답인 409도 `http_req_failed`에 섞여 수치가 부풀려진다 (CodeRabbit 리뷰, PR #97).
 
 | 전략 | TPS | p50 (ms) | p95 (ms) | p99 (ms) | 실패율(5xx) | 데드락 발생 |
 |---|---|---|---|---|---|---|

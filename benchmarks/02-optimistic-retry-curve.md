@@ -25,7 +25,9 @@ set -a && source ./.env && set +a
 
 > 이 세션은 Docker가 없는 원격 컨테이너라 실제 수치를 측정할 수 없다. 로컬에서
 > `scripts/benchmark-optimistic-retries.sh` 실행 후 `benchmarks/raw/optimistic-retries-*-run*.json`
-> (3회)의 중앙값을 읽어 채운다.
+> (3회)의 중앙값을 읽어 채운다. `실패율(재시도 소진)`은 각 summary의 `server_error_rate.rate`
+> (503 — 재시도 소진/락 타임아웃)를 쓴다 — `http_req_failed`를 쓰면 재고 소진 시 정상 응답인
+> 409까지 섞인다 (CodeRabbit 리뷰, PR #97).
 
 | max-retries | TPS | p50 (ms) | p95 (ms) | p99 (ms) | 실패율(재시도 소진) |
 |---|---|---|---|---|---|
