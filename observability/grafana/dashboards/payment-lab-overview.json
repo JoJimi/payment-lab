@@ -101,7 +101,7 @@
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
       "targets": [
         {
-          "expr": "1000 * sum(rate(resilience4j_timelimiter_calls_seconds_sum{name=\"mockPg\", job=\"payment-service\"}[1m])) by (kind) / sum(rate(resilience4j_timelimiter_calls_seconds_count{name=\"mockPg\", job=\"payment-service\"}[1m])) by (kind)",
+          "expr": "1000 * sum(rate(resilience4j_circuitbreaker_calls_seconds_sum{name=\"mockPg\", job=\"payment-service\"}[1m])) by (kind) / sum(rate(resilience4j_circuitbreaker_calls_seconds_count{name=\"mockPg\", job=\"payment-service\"}[1m])) by (kind)",
           "legendFormat": "{{kind}}"
         }
       ]
