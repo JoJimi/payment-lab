@@ -362,9 +362,10 @@ CodeRabbit은 **GitHub App**이라 Actions 워크플로가 필요 없습니다. 
   - `k6/saga-order-flow.js`의 `PROFILE` 환경변수로 전환. 로컬에서 4개 전부 실행 검증 완료 — smoke(VU 1)는 정상(Saga 완료 평균 10.46초), load(VU 20)부터 주문 생성 API 자체가 평균 6.74초로 느려지고 Saga 완료가 POLL_TIMEOUT_MS(15초) 안에 못 끝남. 로컬 1대에 4서비스+Kafka+Postgres 3개+Redis를 다 띄운 환경의 자원 한계로 보이며, 원인 분석은 3.12(벤치마크 리포트)로 넘김.
 - [x] **3.11** 측정 자동화 — 스크립트 한 번으로 결과가 파일로 떨어지게
   - `scripts/measure-load-profiles.sh` (PR #95). 로컬에서 전체 실행 검증 완료 — `benchmarks/raw/`에 `smoke.json`, `load-run{1,2,3}.json`, `stress.json`, `stress-points.json`, `spike.json`, `spike-points.json` 7개 전부 생성 확인.
-- [ ] **3.12** **종합 벤치마크 리포트 작성**
+- [x] **3.12** **종합 벤치마크 리포트 작성**
   - 락 전략별 (1단계 재측정) / 캐시 유무별 / 모놀리식 vs MSA / 서킷 유무별
   - 각각 TPS / p50 / p95 / p99 / 에러율
+  - `benchmarks/01-lock-strategies.md` ~ `06-cache.md` 실측 완료 + `benchmarks/07-summary.md`로 4축 종합(PR #97). p99는 모놀리식 vs MSA/서킷 유무 두 축에서 원본 미수집이라 사후 추정 없이 "미측정"으로 명시. 로컬 측정 환경(인텔리제이+Docker Desktop/WSL2 동시 구동) 노이즈로 p95/p99 절대값 신뢰 구간이 넓다는 점을 교차 축 공통 한계로 기록.
 - [ ] **3.13** Grafana 대시보드 정리 — 서킷 상태, PG 응답시간, Saga 단계별 소요시간
 - [ ] **3.14** **(선택) 야간 성능 회귀 워크플로** — `schedule` 트리거로 k6 smoke를 돌려 p95가 기준치를 넘으면 이슈 자동 생성
   - PR마다 돌리기엔 무겁고 러너 성능 편차가 커서 노이즈가 큽니다. 절대값 비교는 로컬에서, CI는 "급격한 악화 감지" 용도로만 쓰세요.
