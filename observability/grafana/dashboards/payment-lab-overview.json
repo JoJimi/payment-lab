@@ -91,6 +91,34 @@
           "legendFormat": "{{state}}"
         }
       ]
+    },
+    {
+      "id": 7,
+      "title": "3.13 — PG 응답시간 (평균, mockPg, 결과별)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "1000 * sum(rate(resilience4j_timelimiter_calls_seconds_sum{name=\"mockPg\", job=\"payment-service\"}[1m])) by (kind) / sum(rate(resilience4j_timelimiter_calls_seconds_count{name=\"mockPg\", job=\"payment-service\"}[1m])) by (kind)",
+          "legendFormat": "{{kind}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "3.13 — Saga 단계별 소요시간 (평균, 스텝별)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "1000 * sum(rate(saga_step_duration_seconds_sum[1m])) by (step) / sum(rate(saga_step_duration_seconds_count[1m])) by (step)",
+          "legendFormat": "{{step}}"
+        }
+      ]
     }
   ]
 }
