@@ -22,4 +22,10 @@ public class ProductController {
     public ProductResponse getProduct(@PathVariable Long productId) {
         return productService.getProduct(productId);
     }
+
+    /** 3.12 — 캐시 유무 성능 비교용 대조군. {@link ProductService#getProductUnprotected}는 1.17부터 존재했지만 HTTP로는 노출되지 않았다. */
+    @GetMapping("/{productId}/uncached")
+    public ProductResponse getProductUncached(@PathVariable Long productId) {
+        return productService.getProductUnprotected(productId);
+    }
 }

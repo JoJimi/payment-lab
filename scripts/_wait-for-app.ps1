@@ -29,15 +29,21 @@ function Wait-AppReady {
 }
 
 function Stop-AppJava {
-    # pkill -f 'org.example.cs_study.CsStudyApplication'의 PowerShell 이식.
+    # pkill -f '<메인 클래스>'의 PowerShell 이식.
     # gradlew.bat -> Gradle daemon -> 실제 Spring Boot JVM으로 여러 겹 포크되므로,
     # PID를 직접 추적하는 대신 커맨드라인으로 앱 JVM을 정확히 찾아 죽인다.
     #
     # Stop-Process -Force는 종료 "요청"만 보내고 완료를 기다리지 않는다 — 호출 직후 바로
-    # bootRun을 다시 띄우면 기존 JVM이 8080 포트를 아직 붙들고 있을 수 있어(CodeRabbit 지적),
+    # bootRun을 다시 띄우면 기존 JVM이 포트를 아직 붙들고 있을 수 있어(CodeRabbit 지적),
     # Wait-Process로 실제 종료를 확인한 뒤 반환한다.
+    #
+    # 3.12 — 2.1(서비스 분리) 이후 대상이 CsStudyApplication 하나가 아니게 되어 매개변수로 뺐다.
+    param(
+        [string]$MainClass = "org.example.cs_study.inventory.InventoryServiceApplication"
+    )
+
     $procIds = Get-CimInstance Win32_Process -Filter "Name = 'java.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -like "*org.example.cs_study.CsStudyApplication*" } |
+        Where-Object { $_.CommandLine -like "*$MainClass*" } |
         ForEach-Object {
             Write-Host "기존 앱 프로세스 종료: PID $($_.ProcessId)"
             Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
