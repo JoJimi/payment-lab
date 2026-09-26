@@ -50,7 +50,7 @@ foreach ($Strategy in $Strategies) {
     Start-Sleep -Seconds 2
 
     $proc = Start-Process -FilePath ".\gradlew.bat" `
-        -ArgumentList "inventory-service:bootRun", "--args=""--inventory.lock-strategy=$Strategy""" `
+        -ArgumentList "inventory-service:bootRun", "--args=""--spring.profiles.active=dev,benchmark --inventory.lock-strategy=$Strategy""" `
         -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput "benchmarks/raw/$Strategy.bootrun.log" `
         -RedirectStandardError "benchmarks/raw/$Strategy.bootrun.err.log"

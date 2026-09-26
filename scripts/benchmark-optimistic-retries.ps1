@@ -41,7 +41,7 @@ foreach ($Retries in $RetryCounts) {
     Start-Sleep -Seconds 2
 
     $proc = Start-Process -FilePath ".\gradlew.bat" `
-        -ArgumentList "inventory-service:bootRun", "--args=""--inventory.lock-strategy=OPTIMISTIC --inventory.optimistic-lock.max-retries=$Retries""" `
+        -ArgumentList "inventory-service:bootRun", "--args=""--spring.profiles.active=dev,benchmark --inventory.lock-strategy=OPTIMISTIC --inventory.optimistic-lock.max-retries=$Retries""" `
         -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput "benchmarks/raw/optimistic-retries-$Retries.bootrun.log" `
         -RedirectStandardError "benchmarks/raw/optimistic-retries-$Retries.bootrun.err.log"
