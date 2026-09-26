@@ -59,7 +59,10 @@ for STRATEGY in "${STRATEGIES[@]}"; do
   # 전략 전환은 재기동으로만 한다 (CLAUDE.md: 한 번에 한 개념만 켠다 — 핫스위치 없음).
   pkill -f 'org.example.cs_study.inventory.InventoryServiceApplication' 2>/dev/null || true
   sleep 2
-  ./gradlew inventory-service:bootRun --args="--inventory.lock-strategy=${STRATEGY}" &
+  # inventory-service 로그(Hibernate TRACE 포함)를 터미널에 그대로 흘리면 k6 진행률/결과가
+  # 그 사이에 묻혀 복사하기 어려워진다 — 파일로 빼서 필요할 때만 열어본다.
+  ./gradlew inventory-service:bootRun --args="--inventory.lock-strategy=${STRATEGY}" \
+    > "benchmarks/raw/${STRATEGY}.bootrun.log" 2>&1 &
   APP_PID=$!
   # set -e라 wait_for_app_ready가 타임아웃(exit 1)하면 아래 kill에 못 미치고 스크립트가
   # 곧장 끝난다 — bootRun 프로세스가 백그라운드에 남는 걸 막기 위해 EXIT 트랩으로 대비한다.
