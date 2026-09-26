@@ -36,12 +36,14 @@ CI/CD 설정 전문(부록 D), 파이프라인 운영(부록 E), 문서 체계(�
 ### benchmarks/ — 숫자로 증명한 것
 | 문서 | 내용 | 작성 시점 |
 |---|---|---|
-| `00-baseline.md` | 기준선 측정 | 1단계 |
 | `01-lock-strategies.md` | 락 4종 비교 | 1단계 |
-| `02-cache.md` | 캐시 유무, Stampede 방어 전후 | 1단계 |
-| `03-monolith-vs-msa.md` | 분리로 잃은 latency와 얻은 것 | 2단계 |
-| `04-circuit-breaker.md` | 장애 주입 시나리오와 서킷 전이 | 3단계 |
-| `05-rag-retrieval.md` | 골든셋 검색 정확도 | 4단계 |
+| `02-optimistic-retry-curve.md` | 낙관적 락 재시도 횟수별 성능 곡선 | 1단계 |
+| `03-baseline.md` | 기준선 측정 | 1단계 |
+| `04-saga-comparison.md` | 분리로 잃은 latency와 얻은 것(1단계 vs 2단계) | 2단계 |
+| `05-circuit-breaker.md` | 장애 주입 시나리오와 서킷 유무 비교 | 3단계 |
+| `06-cache.md` | 캐시 유무 비교 | 3단계 |
+| `07-summary.md` | 종합 벤치마크 리포트(락/캐시/MSA/서킷 4축 종합) | 3단계 |
+| `08-rag-retrieval.md` | 골든셋 검색 정확도 | 4단계 |
 
 ### [troubleshooting/](troubleshooting/) — 막혔던 것과 뚫은 방법
 | 문서 | 영역 | 상태 |
