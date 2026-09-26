@@ -22,4 +22,10 @@ public class ProductController {
     public ProductResponse getProduct(@PathVariable Long productId) {
         return productService.getProduct(productId);
     }
+
+    /** 3.12 — 캐시 유무 성능 비교용 대조군. {@link ProductService#getProductUncached}는 어노테이션이 아예 없어 매 호출이 DB를 때린다. */
+    @GetMapping("/{productId}/uncached")
+    public ProductResponse getProductUncached(@PathVariable Long productId) {
+        return productService.getProductUncached(productId);
+    }
 }

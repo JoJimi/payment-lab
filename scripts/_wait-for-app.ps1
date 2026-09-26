@@ -29,15 +29,21 @@ function Wait-AppReady {
 }
 
 function Stop-AppJava {
-    # pkill -f 'org.example.cs_study.CsStudyApplication'의 PowerShell 이식.
+    # pkill -f '<메인 클래스>'의 PowerShell 이식.
     # gradlew.bat -> Gradle daemon -> 실제 Spring Boot JVM으로 여러 겹 포크되므로,
     # PID를 직접 추적하는 대신 커맨드라인으로 앱 JVM을 정확히 찾아 죽인다.
     #
     # Stop-Process -Force는 종료 "요청"만 보내고 완료를 기다리지 않는다 — 호출 직후 바로
-    # bootRun을 다시 띄우면 기존 JVM이 8080 포트를 아직 붙들고 있을 수 있어(CodeRabbit 지적),
+    # bootRun을 다시 띄우면 기존 JVM이 포트를 아직 붙들고 있을 수 있어(CodeRabbit 지적),
     # Wait-Process로 실제 종료를 확인한 뒤 반환한다.
+    #
+    # 3.12 — 2.1(서비스 분리) 이후 대상이 CsStudyApplication 하나가 아니게 되어 매개변수로 뺐다.
+    param(
+        [string]$MainClass = "org.example.cs_study.inventory.InventoryServiceApplication"
+    )
+
     $procIds = Get-CimInstance Win32_Process -Filter "Name = 'java.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -like "*org.example.cs_study.CsStudyApplication*" } |
+        Where-Object { $_.CommandLine -like "*$MainClass*" } |
         ForEach-Object {
             Write-Host "기존 앱 프로세스 종료: PID $($_.ProcessId)"
             Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
@@ -56,6 +62,31 @@ function Stop-AppJava {
             }
             # Get-Process에서 안 잡히면 이미 종료된 것 — Wait-Process가 그 사이 타이밍에 걸려 던진
             # 오류이므로 무시해도 안전하다.
+        }
+    }
+}
+
+function Import-DotEnv {
+    # bash 버전의 `set -a && source ./.env && set +a`에 해당. docker-compose.yml이 여전히
+    # DB_USERNAME/DB_PASSWORD를 .env에서 읽으므로, 이 스크립트를 그 값이 이미 호스트
+    # PowerShell 환경에 로드된 것을 전제로 짜면 문서화된 사용법(docker compose up만 실행)
+    # 만으로는 DB_USERNAME이 비어 실패한다 — 없으면 .env를 직접 파싱해 채운다
+    # (CodeRabbit 리뷰, PR #97).
+    param([string]$Path = ".env")
+
+    if (-not (Test-Path $Path)) {
+        return
+    }
+
+    Get-Content $Path | ForEach-Object {
+        if ($_ -match '^\s*#' -or $_ -notmatch '=') {
+            return
+        }
+        $name, $value = $_ -split '=', 2
+        $name = $name.Trim()
+        $value = $value.Trim().Trim('"').Trim("'")
+        if ($name -and -not (Get-Item "env:$name" -ErrorAction SilentlyContinue)) {
+            Set-Item "env:$name" $value
         }
     }
 }

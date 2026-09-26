@@ -7,8 +7,9 @@
 | 항목 | 값 |
 |---|---|
 | Hikari `maximum-pool-size` | ← `application-dev.yml` 값 기록 (락 비교의 숨은 변수, CLAUDE.md) |
+| 대상 | inventory-service (8083), `POST /api/inventory/{id}/reserve` (3.12 신설 — 동기 전용 벤치마크 엔드포인트) |
 | VUs / Duration | 50 / 30s (`scripts/benchmark-lock-strategies.sh` 기본값) |
-| 초기 재고 | 100 |
+| 초기 재고 | 100000 (재고 소진 자체가 목적이 아니라 넉넉하게 — 3.12, CodeRabbit 리뷰 PR #97) |
 | 반복 횟수 | 워밍업 1회 + 측정 3회, 중앙값 사용 (CLAUDE.md 측정 규칙) |
 | 실행 위치 | 로컬 Docker (CI 러너 아님 — 부록 C) |
 
@@ -16,25 +17,50 @@
 
 ```bash
 docker compose -f docker-compose.yml up -d
-./gradlew mockPgRun &
+set -a && source ./.env && set +a
 ./scripts/benchmark-lock-strategies.sh
 ```
 
 ## 결과
 
-> 이 세션은 Docker가 없는 원격 컨테이너라 실제 수치를 측정할 수 없다. 아래는 채워야 할
-> 표의 틀이다. `benchmarks/raw/<전략>.json`(k6 summary export)을 읽어 채운다.
+로컬(Windows, Docker Desktop)에서 `scripts/benchmark-lock-strategies.sh` 실행. 워밍업 1회 +
+측정 3회의 중앙값. `실패율(5xx)`은 `server_error_rate.rate`(재고 소진 시 정상 응답인 409는
+제외하고 진짜 5xx만).
 
-| 전략 | TPS | p95 (ms) | 실패율(5xx) | 데드락 발생 |
-|---|---|---|---|---|
-| NONE (락 없음) | TODO | TODO | TODO | TODO |
-| PESSIMISTIC | TODO | TODO | TODO | TODO |
-| OPTIMISTIC (재시도 3회) | TODO | TODO | TODO | TODO |
-| DISTRIBUTED | TODO | TODO | TODO | TODO |
+| 전략 | TPS | p50 (ms) | p95 (ms) | p99 (ms) | 실패율(5xx) | 비고 |
+|---|---|---|---|---|---|---|
+| NONE (락 없음) | 253.79/s | 165.74 | 438.10 | 617.61 | 0.00% | 락 대기 자체가 없어 압도적으로 빠름 |
+| PESSIMISTIC | 53.92/s | 884.64 | 1,210 | 1,310 | 0.00% | 느리지만 실패 0%, p50~p99 폭도 가장 좁음(예측 가능) |
+| OPTIMISTIC (재시도 3회) | 17.59/s | 2,070 | 6,910 | 10,610 | 71.48% | 4개 중 최악 — 낮은 처리량+높은 실패율+넓은 꼬리 지연이 동시에 |
+| DISTRIBUTED | 11.10/s | 3,850 | 10,030 | 10,250 | 6.04% | 가장 느림(Redis 왕복), 실패율은 OPTIMISTIC보다 훨씬 낮음 |
 
-## 관찰 메모 (측정 후 채울 것)
+(원본: `benchmarks/raw/{NONE,PESSIMISTIC,OPTIMISTIC,DISTRIBUTED}-run{1,2,3}.json`, 2026-09-26 로컬 측정)
 
-- NONE은 재고 초과 판매가 실제로 발생하는지 (`InventoryConcurrencyTest`의 재현과 일치하는지)
-- PESSIMISTIC의 TPS가 낮다면 원인이 락 대기인지 Hikari 풀 대기인지 (1.13 TODO, 부록 C)
-- OPTIMISTIC의 실패율이 높다면 경합률 대비 재시도 횟수(1.14)가 부족한 것인지
-- DISTRIBUTED가 PESSIMISTIC보다 느리다면 Redis 왕복 비용 때문인지
+## 관찰 메모 (실측)
+
+- **NONE의 오버셀 여부는 이번 측정에서 직접 확인하지 못했다.** 초기 재고를 100000으로
+  넉넉하게 잡아 재고 소진 자체가 없었고(에러율 0%), k6는 HTTP 상태 코드만 보므로 DB의
+  `available`/`reserved` 값이 실제 성공 건수와 일치하는지는 별도로 `psql`로 확인해야 한다
+  (`InventoryConcurrencyTest`가 이미 소규모로 이 시나리오를 코드 레벨에서 재현하고 있으니,
+  그 결과를 참고하는 편이 이 벤치마크보다 더 직접적인 증거다).
+- **PESSIMISTIC이 "안전하면서 가장 실용적인" 선택으로 보인다.** NONE보다 4.7배 느리지만
+  (53.92/s vs 253.79/s) 실패율 0%, p50(884ms)부터 p99(1.31s)까지 폭이 좁아 지연 시간이
+  예측 가능하다 — `FOR UPDATE`로 같은 행에 대한 요청을 순차 처리하는 구조이므로 데드락이
+  발생할 여지 자체가 없다(단일 락 대상, 교착 조건 불성립).
+- **OPTIMISTIC(재시도 3회)이 4개 전략 중 가장 나쁜 조합을 보였다** — TPS는 DISTRIBUTED
+  다음으로 낮은데(17.59/s) 실패율은 71.48%로 가장 높고, p50(2.07s)과 p99(10.61s) 사이
+  간극도 가장 넓다. 템플릿이 예상했던 "실패율이 높다면 재시도 횟수(1.14)가 부족한 것인지"에
+  대한 답은 `02-optimistic-retry-curve.md`의 재시도 곡선 실측(재시도 늘수록 실패율은 줄지만
+  지연은 더 극단적으로 늘어남)과 함께 보면 명확하다 — 재시도 횟수를 올려도 "덜 실패하지만
+  훨씬 오래 걸리는" 방향으로만 트레이드오프가 움직일 뿐, 이 엔드포인트 하나에 50 VU가
+  몰리는 경합 수준 자체를 재시도로 해소하지는 못한다.
+- **DISTRIBUTED가 PESSIMISTIC보다 확실히 느렸다** (TPS 11.10/s vs 53.92/s, p95 10.03s vs
+  1.21s) — Redis 왕복 비용이 원인이라는 템플릿의 가설과 일치한다. 다만 실패율은
+  OPTIMISTIC(71.48%)보다 훨씬 낮은 6.04%였다 — 분산 락은 "대기는 길지만 결국 대부분
+  성공"하는 쪽에, 낙관적 락(재시도 3회)은 "빨리 포기하는" 쪽에 가깝다.
+- **주의**: `02-optimistic-retry-curve.md`의 `max-retries=3` 데이터(다른 세션에서 측정,
+  p50=931ms/p95=1.51s/실패율=72.62%)와 이 표의 OPTIMISTIC(재시도 3회) 행(p50=2.07s/
+  p95=6.91s/실패율=71.48%)을 비교하면 실패율은 비슷하지만 지연시간이 2~5배 차이 난다.
+  같은 설정인데도 세션마다 이렇게 차이가 크다는 건, 로컬 PC의 백그라운드 부하(인텔리제이
+  + Docker Desktop 동시 실행 등)가 이 벤치마크의 절대값에 상당한 영향을 준다는 뜻이다 —
+  절대값보다 "같은 세션 안에서의 상대적 순위/추세"를 더 신뢰해야 한다(부록 C와 같은 결론).
