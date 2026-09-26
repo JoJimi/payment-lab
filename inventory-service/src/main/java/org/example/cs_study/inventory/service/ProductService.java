@@ -41,6 +41,17 @@ public class ProductService {
         return fetch(productId);
     }
 
+    /**
+     * 3.12 — 캐시 유무 비교의 진짜 대조군. {@link #getProductUnprotected}는 이름과 달리
+     * {@code products-unprotected} 캐시에 걸려 있어(1.17, Stampede 재현용) 반복 호출이
+     * 캐시를 우회하지 못한다 — 캐시 A/B 벤치마크는 어노테이션이 아예 없는 이 메서드를 써야 한다
+     * (CodeRabbit 리뷰, PR #97).
+     */
+    @Transactional(readOnly = true)
+    public ProductResponse getProductUncached(Long productId) {
+        return fetch(productId);
+    }
+
     private ProductResponse fetch(Long productId) {
         dbHitCount.incrementAndGet();
         Product product = productRepository.findById(productId).orElseThrow(() -> new ProductNotFoundException(productId));

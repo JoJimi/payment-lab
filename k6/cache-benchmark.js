@@ -12,6 +12,12 @@ export const options = {
       duration: __ENV.DURATION || '30s',
     },
   },
+  // 200 이외 응답(예: PRODUCT_ID 오기입)이 섞여도 check()만으로는 k6가 실패로 끝나지 않는다 —
+  // 이 벤치마크는 재고 부족처럼 "정상적인 실패 응답"이 없으므로 전부 통과해야 정상이다
+  // (CodeRabbit 리뷰, PR #97).
+  thresholds: {
+    checks: ['rate==1'],
+  },
 };
 
 const BASE_URL = __ENV.INVENTORY_SERVICE_URL || 'http://localhost:8083';

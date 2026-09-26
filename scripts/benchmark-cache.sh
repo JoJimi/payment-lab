@@ -37,8 +37,11 @@ run_mode() {
 
   for i in 1 2 3; do
     echo "=== [${mode}] 측정 ${i}/3 ==="
+    # k6 기본 summaryTrendStats엔 p99가 없다 — benchmarks/06-cache.md 표가 p99를 요구하므로
+    # 명시적으로 추가한다 (CodeRabbit 리뷰, PR #97).
     k6 run --env MODE="${mode}" --env VUS="${VUS}" --env DURATION="${DURATION}" --env PRODUCT_ID="${PRODUCT_ID}" \
       --env INVENTORY_SERVICE_URL="${INVENTORY_SERVICE_URL}" \
+      --summary-trend-stats="avg,min,med,max,p(90),p(95),p(99)" \
       --summary-export="benchmarks/raw/cache-${mode}-run${i}.json" \
       k6/cache-benchmark.js
   done

@@ -8,30 +8,31 @@
 | 항목 | 값 |
 |---|---|
 | Hikari `maximum-pool-size` | ← `application-dev.yml` 값 기록 |
+| 대상 | inventory-service (8083), `POST /api/inventory/{id}/reserve` (3.12 신설 — 동기 전용 벤치마크 엔드포인트) |
 | VUs / Duration | 50 / 30s |
-| 초기 재고 | 100 |
+| 초기 재고 | 100000 (재고 소진 자체가 목적이 아니라 넉넉하게 — 3.12, CodeRabbit 리뷰 PR #97) |
 | 반복 | 워밍업 1회 + 측정 3회, 중앙값 |
 
 ## 실행 방법
 
 ```bash
 docker compose -f docker-compose.yml up -d
-./gradlew mockPgRun &
+set -a && source ./.env && set +a
 ./scripts/benchmark-optimistic-retries.sh
 ```
 
 ## 결과
 
 > 이 세션은 Docker가 없는 원격 컨테이너라 실제 수치를 측정할 수 없다. 로컬에서
-> `scripts/benchmark-optimistic-retries.sh` 실행 후 `benchmarks/raw/optimistic-retries-*.json`을
-> 읽어 채운다.
+> `scripts/benchmark-optimistic-retries.sh` 실행 후 `benchmarks/raw/optimistic-retries-*-run*.json`
+> (3회)의 중앙값을 읽어 채운다.
 
-| max-retries | TPS | p95 (ms) | 실패율(재시도 소진) |
-|---|---|---|---|
-| 1 | TODO | TODO | TODO |
-| 3 | TODO | TODO | TODO |
-| 5 | TODO | TODO | TODO |
-| 10 | TODO | TODO | TODO |
+| max-retries | TPS | p50 (ms) | p95 (ms) | p99 (ms) | 실패율(재시도 소진) |
+|---|---|---|---|---|---|
+| 1 | TODO | TODO | TODO | TODO | TODO |
+| 3 | TODO | TODO | TODO | TODO | TODO |
+| 5 | TODO | TODO | TODO | TODO | TODO |
+| 10 | TODO | TODO | TODO | TODO | TODO |
 
 ## 예상되는 패턴 (측정 후 실제 값과 비교)
 

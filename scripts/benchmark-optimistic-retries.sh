@@ -21,18 +21,30 @@ source "${SCRIPT_DIR}/_wait-for-app.sh"
 
 RETRY_COUNTS=(1 3 5 10)
 PRODUCT_ID=${PRODUCT_ID:-1}
-STOCK=${STOCK:-100}
+# 재고 소진 자체가 목적이 아니다 — benchmark-lock-strategies.sh와 같은 이유로 넉넉하게 잡는다
+# (CodeRabbit 리뷰, PR #97).
+STOCK=${STOCK:-100000}
 VUS=${VUS:-50}
 DURATION=${DURATION:-30s}
 INVENTORY_SERVICE_URL=${INVENTORY_SERVICE_URL:-http://localhost:8083}
 
 mkdir -p benchmarks/raw
 
+# CodeRabbit 리뷰(PR #97) — benchmark-lock-strategies.sh와 동일한 이유로 RETURNING 확인.
 reset_inventory() {
-  docker exec payment-lab-postgres-inventory psql \
-    -U "${DB_USERNAME:?DB_USERNAME이 필요합니다 — .env를 source 하세요}" \
-    -d payment_lab_inventory -v ON_ERROR_STOP=1 -Atq -c \
-    "UPDATE inventory SET available = ${STOCK}, reserved = 0 WHERE product_id = ${PRODUCT_ID};"
+  local updated_product_id
+  updated_product_id="$(
+    docker exec payment-lab-postgres-inventory psql \
+      -U "${DB_USERNAME:?DB_USERNAME이 필요합니다 — .env를 source 하세요}" \
+      -d payment_lab_inventory -v ON_ERROR_STOP=1 -Atq -c \
+      "UPDATE inventory SET available = ${STOCK}, reserved = 0
+       WHERE product_id = ${PRODUCT_ID}
+       RETURNING product_id;"
+  )"
+  if [[ "${updated_product_id}" != "${PRODUCT_ID}" ]]; then
+    echo "inventory 행이 없습니다: product_id=${PRODUCT_ID}" >&2
+    exit 1
+  fi
 }
 
 for RETRIES in "${RETRY_COUNTS[@]}"; do
@@ -61,6 +73,7 @@ for RETRIES in "${RETRY_COUNTS[@]}"; do
     k6 run \
       --env VUS="${VUS}" --env DURATION="${DURATION}" --env PRODUCT_ID="${PRODUCT_ID}" \
       --env INVENTORY_SERVICE_URL="${INVENTORY_SERVICE_URL}" \
+      --summary-trend-stats="avg,min,med,max,p(90),p(95),p(99)" \
       --summary-export="benchmarks/raw/optimistic-retries-${RETRIES}-run${i}.json" \
       k6/inventory-lock-benchmark.js
   done

@@ -66,6 +66,31 @@ function Stop-AppJava {
     }
 }
 
+function Import-DotEnv {
+    # bash 버전의 `set -a && source ./.env && set +a`에 해당. docker-compose.yml이 여전히
+    # DB_USERNAME/DB_PASSWORD를 .env에서 읽으므로, 이 스크립트를 그 값이 이미 호스트
+    # PowerShell 환경에 로드된 것을 전제로 짜면 문서화된 사용법(docker compose up만 실행)
+    # 만으로는 DB_USERNAME이 비어 실패한다 — 없으면 .env를 직접 파싱해 채운다
+    # (CodeRabbit 리뷰, PR #97).
+    param([string]$Path = ".env")
+
+    if (-not (Test-Path $Path)) {
+        return
+    }
+
+    Get-Content $Path | ForEach-Object {
+        if ($_ -match '^\s*#' -or $_ -notmatch '=') {
+            return
+        }
+        $name, $value = $_ -split '=', 2
+        $name = $name.Trim()
+        $value = $value.Trim().Trim('"').Trim("'")
+        if ($name -and -not (Get-Item "env:$name" -ErrorAction SilentlyContinue)) {
+            Set-Item "env:$name" $value
+        }
+    }
+}
+
 function Assert-LastExitCode {
     # docker/k6 같은 외부 네이티브 명령은 $ErrorActionPreference = "Stop"로도 잡히지 않는다
     # (Windows PowerShell 5.1엔 $PSNativeCommandUseErrorActionPreference가 없음 — CodeRabbit 지적).

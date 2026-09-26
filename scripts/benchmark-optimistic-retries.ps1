@@ -10,21 +10,28 @@
 
 $ErrorActionPreference = "Stop"
 . "$PSScriptRoot/_wait-for-app.ps1"
+Import-DotEnv
 
 $RetryCounts = @(1, 3, 5, 10)
 $ProductId = if ($env:PRODUCT_ID) { $env:PRODUCT_ID } else { 1 }
-$Stock = if ($env:STOCK) { $env:STOCK } else { 100 }
+# 재고 소진 자체가 목적이 아니다 — benchmark-lock-strategies.ps1과 같은 이유로 넉넉하게 잡는다
+# (CodeRabbit 리뷰, PR #97).
+$Stock = if ($env:STOCK) { $env:STOCK } else { 100000 }
 $Vus = if ($env:VUS) { $env:VUS } else { 50 }
 $Duration = if ($env:DURATION) { $env:DURATION } else { "30s" }
 $InventoryServiceUrl = if ($env:INVENTORY_SERVICE_URL) { $env:INVENTORY_SERVICE_URL } else { "http://localhost:8083" }
-$DbUsername = if ($env:DB_USERNAME) { $env:DB_USERNAME } else { throw "DB_USERNAME이 필요합니다 — .env를 로드하세요" }
+$DbUsername = if ($env:DB_USERNAME) { $env:DB_USERNAME } else { throw "DB_USERNAME이 필요합니다 — .env에 설정하세요" }
 
 New-Item -ItemType Directory -Force -Path "benchmarks/raw" | Out-Null
 
 function Reset-Inventory {
-    docker exec payment-lab-postgres-inventory psql -U $DbUsername -d payment_lab_inventory -v ON_ERROR_STOP=1 -c `
-        "UPDATE inventory SET available = $Stock, reserved = 0 WHERE product_id = $ProductId;"
+    # CodeRabbit 리뷰(PR #97) — benchmark-lock-strategies.ps1과 동일한 이유로 RETURNING 확인.
+    $updatedProductId = docker exec payment-lab-postgres-inventory psql -U $DbUsername -d payment_lab_inventory -v ON_ERROR_STOP=1 -Atq -c `
+        "UPDATE inventory SET available = $Stock, reserved = 0 WHERE product_id = $ProductId RETURNING product_id;"
     Assert-LastExitCode "재고 초기화"
+    if ($updatedProductId -ne "$ProductId") {
+        throw "inventory 행이 없습니다: product_id=$ProductId"
+    }
 }
 
 foreach ($Retries in $RetryCounts) {
@@ -51,8 +58,11 @@ foreach ($Retries in $RetryCounts) {
             Reset-Inventory
 
             Write-Host "--- 측정 $i/3 ---"
+            # k6 기본 summaryTrendStats엔 p99가 없다 — 3.12 종합 리포트가 p50/p99도 요구한다
+            # (CodeRabbit 리뷰, PR #97).
             k6 run `
                 --env VUS=$Vus --env DURATION=$Duration --env PRODUCT_ID=$ProductId --env INVENTORY_SERVICE_URL=$InventoryServiceUrl `
+                --summary-trend-stats="avg,min,med,max,p(90),p(95),p(99)" `
                 --summary-export="benchmarks/raw/optimistic-retries-$Retries-run$i.json" `
                 k6/inventory-lock-benchmark.js
             Assert-LastExitCode "측정 $i k6 실행"
