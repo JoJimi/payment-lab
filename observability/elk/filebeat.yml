@@ -1,0 +1,64 @@
+# 4.3 — 4개 서비스가 0.5에서부터 찍고 있는 ECS JSON 파일(logs/<service>.json)을 그대로
+# payment-logs 데이터 스트림(4.2)에 적재한다. 서비스는 ./gradlew :xxx-service:bootRun으로
+# 호스트에서 직접 뜨므로(docker-compose.yml 인프라와 동일 패턴), 컨테이너 안에서는 각
+# 서비스의 logs/ 디렉터리를 read-only로 마운트해서 읽는다(docker-compose.elk.yml 참고).
+#
+# ndjson 파서로 한 줄 = JSON 객체 한 건을 그대로 파싱해서 루트에 올린다(target: "") —
+# Boot 내장 ECS 인코더가 이미 @timestamp/log.level/service.name 등을 표준 ECS 구조로
+# 내보내므로 별도 필드 변환이 필요 없다. overwrite_keys를 켜서 파일 안의 실제 로그 시각
+# (@timestamp)이 Filebeat의 수집 시각을 덮어쓰게 한다.
+filebeat.inputs:
+  - type: filestream
+    id: order-service-logs
+    paths:
+      - /logs/order-service/*.json
+    parsers:
+      - ndjson:
+          target: ""
+          add_error_key: true
+          overwrite_keys: true
+
+  - type: filestream
+    id: payment-service-logs
+    paths:
+      - /logs/payment-service/*.json
+    parsers:
+      - ndjson:
+          target: ""
+          add_error_key: true
+          overwrite_keys: true
+
+  - type: filestream
+    id: inventory-service-logs
+    paths:
+      - /logs/inventory-service/*.json
+    parsers:
+      - ndjson:
+          target: ""
+          add_error_key: true
+          overwrite_keys: true
+
+  - type: filestream
+    id: notification-service-logs
+    paths:
+      - /logs/notification-service/*.json
+    parsers:
+      - ndjson:
+          target: ""
+          add_error_key: true
+          overwrite_keys: true
+
+# 템플릿/ILM은 4.2에서 scripts/setup-elk.sh로 이미 만들어뒀다 — Filebeat 자체 기본
+# 템플릿으로 덮어쓰지 않게 끈다. Kibana 대시보드 자동 로드(setup.dashboards)도
+# 이 프로젝트에선 4.5에서 수동으로 만들 것이라 끈다.
+setup.template.enabled: false
+setup.ilm.enabled: false
+setup.dashboards.enabled: false
+
+output.elasticsearch:
+  hosts: ["http://elasticsearch:9200"]
+  # payment-logs는 이미 데이터 스트림으로 존재한다(4.2) — 이 이름으로 쓰면 일반 인덱스가
+  # 아니라 데이터 스트림 append로 처리된다.
+  index: "payment-logs"
+
+logging.level: info

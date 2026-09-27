@@ -48,5 +48,31 @@ services:
       - elasticsearch
     mem_limit: 1g
 
+  # 4.3 — 4개 서비스의 logs/<service>.json(ECS)을 payment-logs 데이터 스트림으로 적재.
+  # 서비스는 컨테이너 밖 호스트에서 ./gradlew :xxx-service:bootRun으로 뜨므로, 컨테이너
+  # 안에서는 각 서비스 디렉터리의 logs/를 read-only 바인드 마운트로 읽는다.
+  #
+  # 주의(부팅 실패 조건, 시끄러운 실패): 공식 Filebeat 이미지는 마운트된 filebeat.yml이
+  # group/world-writable이면 "config file can only be writable by the owner" 에러로
+  # 죽는다. Windows/WSL2 바인드 마운트는 host 파일의 소유권 매핑이 불안정해 이 체크가
+  # 자꾸 걸릴 수 있어서, chmod 대신 --strict.perms=false로 아예 그 검사를 끈다(로컬
+  # 학습용 컨테이너라 허용 — 운영이었다면 파일 권한을 제대로 맞추는 쪽을 택했을 것).
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.15.0
+    container_name: payment-lab-filebeat
+    user: root
+    command: ["--strict.perms=false", "-e"]
+    volumes:
+      - ./observability/elk/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - ./order-service/logs:/logs/order-service:ro
+      - ./payment-service/logs:/logs/payment-service:ro
+      - ./inventory-service/logs:/logs/inventory-service:ro
+      - ./notification-service/logs:/logs/notification-service:ro
+      - filebeat_data:/usr/share/filebeat/data
+    depends_on:
+      - elasticsearch
+    mem_limit: 256m
+
 volumes:
   elasticsearch_data:
+  filebeat_data:
