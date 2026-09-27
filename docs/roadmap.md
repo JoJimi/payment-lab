@@ -393,10 +393,10 @@ CodeRabbit은 **GitHub App**이라 Actions 워크플로가 필요 없습니다. 
 - [x] **4.2** 인덱스 설계 — `payment-logs-*` : 원본 로그(ECS 포맷), ILM으로 보존기간 관리
   - `payment-logs`를 데이터 스트림으로 구성(`observability/elk/index-template-payment-logs.json`) — hot 1일/1GB 롤오버 후 14일 뒤 삭제하는 ILM 정책(`observability/elk/ilm-policy-payment-logs.json`)을 붙였다. `scripts/setup-elk.sh`로 로컬 ES에 적용, 사용자가 `{"acknowledged":true}` 응답으로 확인
   - (RAG 재개 시 추가) `payment-incidents`(이상거래/실패 사례 문서), `payment-knowledge`(벡터 임베딩, `dense_vector`)는 로그용 인덱스와 명확히 분리
-- [ ] **4.3** 적재 방식 — Filebeat 경유. 0단계에서 ECS JSON 파일 출력을 이미 켜뒀으므로 그대로 맞물립니다.
-  - `observability/elk/filebeat.yml` + `docker-compose.elk.yml`의 `filebeat` 서비스. 4개 서비스의 `logs/<service>.json`을 각각 read-only 마운트해서 `payment-logs` 데이터 스트림(4.2)으로 적재
-- [ ] **4.4** `traceId` 기반으로 하나의 주문이 4개 서비스를 지나간 로그를 한 번에 조회 가능한지 확인
-  - R.CI6의 Tracing 검증 테스트가 통과 상태여야 성립합니다
+- [x] **4.3** 적재 방식 — Filebeat 경유. 0단계에서 ECS JSON 파일 출력을 이미 켜뒀으므로 그대로 맞물립니다.
+  - `observability/elk/filebeat.yml` + `docker-compose.elk.yml`의 `filebeat` 서비스. `./gradlew :xxx-service:bootRun`을 레포 루트에서 실행하면 모든 서비스 로그가 서비스별 디렉터리가 아니라 루트 `./logs/`에 모인다는 걸 사용자가 로컬에서 tail/ls로 확인해 잡아냈고, 마운트를 `./logs:/logs` 하나로 고쳐서 해결. `payment-logs` 데이터 스트림(4.2)에 정상 적재 확인
+- [x] **4.4** `traceId` 기반으로 하나의 주문이 4개 서비스를 지나간 로그를 한 번에 조회 가능한지 확인
+  - 사용자가 실제 주문 1건을 생성해 ES 집계 쿼리로 확인 — traceId 하나에 order-service(120)/payment-service(52)/inventory-service(40)/notification-service(1) 문서가 모두 잡힘
 - [ ] **4.5** Kibana 대시보드 — 실패 사유별 분포, 시간대별 실패율, PG 응답시간 분포
 
 ### 완료 기준
