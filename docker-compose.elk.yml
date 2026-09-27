@@ -1,0 +1,52 @@
+# 4.1 — ES 단일 노드 + Kibana. 부록 B `elk` 프로파일용 추가 구성. 기본 `docker-compose.yml`과
+# 함께 켠다:
+#   docker compose -f docker-compose.yml -f docker-compose.elk.yml up -d
+#
+# 4단계는 로그 파이프라인(4-A)까지만 진행하기로 범위를 조정했다(roadmap.md 참고). 그래서
+# 여기엔 로그용 구성만 있고, 벡터 검색/RAG용 인덱스나 Spring AI 관련 설정은 없다.
+#
+# 로컬 힙 예산(부록 B): ES 힙은 1~2GB로 제한한다. 단일 노드 학습용 클러스터라 xpack 보안은
+# 꺼서 로컬에서 인증 설정 없이 바로 붙게 한다(Grafana의 GF_AUTH_ANONYMOUS_ENABLED와 같은
+# 이유 — 운영이라면 절대 이렇게 켜지 않는다). 보안을 꺼서 발생하는 외부 노출 위험은 호스트
+# 바인딩을 127.0.0.1로 제한해 상쇄한다.
+#
+# 주의(부팅 실패 조건, 시끄러운 실패): ES는 vm.max_map_count >= 262144를 요구한다. Docker
+# Desktop(WSL2)의 기본값은 65530이라 처음 띄우면 컨테이너가 기동 직후 죽고 로그에
+# "max virtual memory areas vm.max_map_count [65530] is too low" 가 명시적으로 남는다.
+# WSL2 배포판 안에서 한 번 설정하면 된다(재부팅하면 초기화되므로 계속 쓰려면
+# `.wslconfig`의 [wsl2] 섹션에 kernelCommandLine으로 고정하거나 매번 다시 실행):
+#   wsl -d docker-desktop sysctl -w vm.max_map_count=262144
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    container_name: payment-lab-elasticsearch
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      xpack.security.enrollment.enabled: "false"
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+    ports:
+      - "127.0.0.1:9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.15.0
+    container_name: payment-lab-kibana
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    ports:
+      - "127.0.0.1:5601:5601"
+    depends_on:
+      - elasticsearch
+    mem_limit: 1g
+
+volumes:
+  elasticsearch_data:
