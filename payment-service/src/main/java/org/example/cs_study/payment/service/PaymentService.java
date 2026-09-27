@@ -1,6 +1,7 @@
 package org.example.cs_study.payment.service;
 
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.example.cs_study.common.exception.payment.PaymentNotFoundException;
 import org.example.cs_study.common.exception.payment.PaymentOrderMismatchException;
 import org.example.cs_study.common.idempotency.Idempotent;
@@ -95,7 +96,21 @@ public class PaymentService {
 
     private PaymentResponse doRequestPayment(String idempotencyKey, RequestPaymentRequest request) {
         Long paymentId = savePending(idempotencyKey, request);
-        MockPgResult result = mockPgGateway.requestPayment(idempotencyKey, request.amount(), request.currency());
+        // 3.13 — resilience4j.circuitbreaker.calls(Micrometer 자동 계측, TaggedCircuitBreakerMetricsPublisher)가
+        // 실제 호출에도 계속 0으로 남는 걸 로컬 실측으로 확인했다 — 상태 게이지(resilience4j.circuitbreaker.state)는
+        // 매 스크레이프마다 직접 폴링이라 정상 동작하지만, calls Timer는 CircuitBreaker 이벤트 구독 방식이라
+        // 이 프로젝트가 겪어온 "Boot 4 조용한 실패" 패턴(docs/troubleshooting/00-spring-boot-4.md)과 같은
+        // 종류로 의심된다. 라이브러리 내부를 더 파는 대신, saga.step.duration/inventory.lock.wait와 같은
+        // 패턴으로 직접 계측해 신뢰할 수 있는 지표를 확보한다.
+        Timer.Sample sample = Timer.start(meterRegistry);
+        String outcome = "ERROR";
+        MockPgResult result;
+        try {
+            result = mockPgGateway.requestPayment(idempotencyKey, request.amount(), request.currency());
+            outcome = result.outcome().name();
+        } finally {
+            sample.stop(meterRegistry.timer("pg.response.time", "outcome", outcome));
+        }
         // mockPgGateway가 대기 중 인터럽트를 받으면 UNKNOWN(TIMEOUT)을 반환하면서 인터럽트
         // 상태를 복원해둔다(CodeRabbit 리뷰, PR #88). 그 상태 그대로 applyResult의 트랜잭션에
         // 들어가면 payment.markUnknown()에 닿기도 전에 트랜잭션 자체가 실패할 수 있다 — 이미
