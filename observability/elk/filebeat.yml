@@ -1,7 +1,13 @@
-# 4.3 — 4개 서비스가 0.5에서부터 찍고 있는 ECS JSON 파일(logs/<service>.json)을 그대로
-# payment-logs 데이터 스트림(4.2)에 적재한다. 서비스는 ./gradlew :xxx-service:bootRun으로
-# 호스트에서 직접 뜨므로(docker-compose.yml 인프라와 동일 패턴), 컨테이너 안에서는 각
-# 서비스의 logs/ 디렉터리를 read-only로 마운트해서 읽는다(docker-compose.elk.yml 참고).
+# 4.3 — 4개 서비스가 0.5에서부터 찍고 있는 ECS JSON 파일을 그대로 payment-logs 데이터
+# 스트림(4.2)에 적재한다.
+#
+# `./gradlew :xxx-service:bootRun`을 레포 루트에서 실행하면 working directory가 루트가
+# 되어, 각 서비스 application-dev.yml의 `logging.file.name: logs/<service>.json`(상대
+# 경로)이 서비스별 디렉터리가 아니라 레포 루트의 ./logs/ 한 곳에 4개 파일로 모인다
+# (docker-compose.elk.yml 참고 — 처음엔 서비스별 디렉터리를 마운트했다가 로그가 전혀
+# 안 잡혀서 뒤늦게 발견한 조용한 실패). 그래서 입력도 하나로 합쳐서 /logs/*.json을 그대로
+# 본다 — 어차피 service.name은 각 로그 안(ECS)에 이미 들어있어서 파일명으로 서비스를
+# 구분할 필요가 없다.
 #
 # ndjson 파서로 한 줄 = JSON 객체 한 건을 그대로 파싱해서 루트에 올린다(target: "") —
 # Boot 내장 ECS 인코더가 이미 @timestamp/log.level/service.name 등을 표준 ECS 구조로
@@ -9,39 +15,9 @@
 # (@timestamp)이 Filebeat의 수집 시각을 덮어쓰게 한다.
 filebeat.inputs:
   - type: filestream
-    id: order-service-logs
+    id: payment-lab-logs
     paths:
-      - /logs/order-service/*.json
-    parsers:
-      - ndjson:
-          target: ""
-          add_error_key: true
-          overwrite_keys: true
-
-  - type: filestream
-    id: payment-service-logs
-    paths:
-      - /logs/payment-service/*.json
-    parsers:
-      - ndjson:
-          target: ""
-          add_error_key: true
-          overwrite_keys: true
-
-  - type: filestream
-    id: inventory-service-logs
-    paths:
-      - /logs/inventory-service/*.json
-    parsers:
-      - ndjson:
-          target: ""
-          add_error_key: true
-          overwrite_keys: true
-
-  - type: filestream
-    id: notification-service-logs
-    paths:
-      - /logs/notification-service/*.json
+      - /logs/*.json
     parsers:
       - ndjson:
           target: ""

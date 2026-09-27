@@ -49,8 +49,14 @@ services:
     mem_limit: 1g
 
   # 4.3 — 4개 서비스의 logs/<service>.json(ECS)을 payment-logs 데이터 스트림으로 적재.
-  # 서비스는 컨테이너 밖 호스트에서 ./gradlew :xxx-service:bootRun으로 뜨므로, 컨테이너
-  # 안에서는 각 서비스 디렉터리의 logs/를 read-only 바인드 마운트로 읽는다.
+  #
+  # 주의(정정, 조용한 실패): 처음엔 각 서비스 모듈 디렉터리(order-service/logs/)를 각각
+  # 마운트했는데 실제로는 틀렸다 — `./gradlew :xxx-service:bootRun`을 레포 루트에서
+  # 실행하면 working directory가 루트가 되어, `logging.file.name: logs/<service>.json`
+  # (각 서비스 application-dev.yml, 상대경로)이 서비스별 하위 디렉터리가 아니라 레포
+  # 루트의 ./logs/ 한 곳에 4개 파일로 모인다. Filebeat는 에러 없이 계속 떠 있었지만
+  # (예전 경로엔 파일이 있었으므로) 새 로그를 전혀 못 보고 있었다 — 증상이 하나도 안
+  # 튀는 조용한 실패라 발견이 늦었다. 그래서 마운트도 하나(./logs)로 합쳤다.
   #
   # 주의(부팅 실패 조건, 시끄러운 실패): 공식 Filebeat 이미지는 마운트된 filebeat.yml이
   # group/world-writable이면 "config file can only be writable by the owner" 에러로
@@ -64,10 +70,7 @@ services:
     command: ["--strict.perms=false", "-e"]
     volumes:
       - ./observability/elk/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
-      - ./order-service/logs:/logs/order-service:ro
-      - ./payment-service/logs:/logs/payment-service:ro
-      - ./inventory-service/logs:/logs/inventory-service:ro
-      - ./notification-service/logs:/logs/notification-service:ro
+      - ./logs:/logs:ro
       - filebeat_data:/usr/share/filebeat/data
     depends_on:
       - elasticsearch
