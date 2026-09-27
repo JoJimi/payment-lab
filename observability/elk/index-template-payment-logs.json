@@ -24,7 +24,12 @@
         "error.type": { "type": "keyword" },
         "error.message": { "type": "text" },
         "error.stack_trace": { "type": "text" },
-        "traceId": { "type": "keyword" }
+        "traceId": { "type": "keyword" },
+        "spanId": { "type": "keyword" },
+        "pgOutcome": { "type": "keyword" },
+        "pgElapsedMs": { "type": "long" },
+        "inventoryOutcome": { "type": "keyword" },
+        "failureReason": { "type": "keyword" }
       }
     }
   },

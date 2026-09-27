@@ -16,6 +16,9 @@ import org.example.cs_study.inventory.domain.Inventory;
 import org.example.cs_study.inventory.domain.OrderLineItem;
 import org.example.cs_study.inventory.repository.InventoryRepository;
 import org.example.cs_study.inventory.repository.OrderLineItemRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 import tools.jackson.databind.ObjectMapper;
@@ -41,6 +44,8 @@ import tools.jackson.databind.ObjectMapper;
  */
 @Component
 public class PaymentCompletedListener {
+
+    private static final Logger log = LoggerFactory.getLogger(PaymentCompletedListener.class);
 
     private final InboxService inboxService;
     private final OutboxService outboxService;
@@ -122,6 +127,25 @@ public class PaymentCompletedListener {
             }
         } finally {
             sample.stop(meterRegistry.timer("saga.step.duration", "step", "INVENTORY", "outcome", outcome));
+            // 4.5 — Kibana "실패 사유별 분포" 패널용(payment-service의 pgOutcome/failureReason과
+            // 같은 MDC 방식). INSUFFICIENT_STOCK만 실패 사유로 취급한다 — ERROR는
+            // order.created 미처리로 인한 재시도(클래스 Javadoc 참고)라 아직 "실패"로 단정할
+            // 수 없는 경우가 섞여 있어 이 필드에는 올리지 않는다.
+            MDC.put("inventoryOutcome", outcome);
+            try {
+                if ("INSUFFICIENT_STOCK".equals(outcome)) {
+                    MDC.put("failureReason", outcome);
+                    try {
+                        log.warn("재고 예약 실패");
+                    } finally {
+                        MDC.remove("failureReason");
+                    }
+                } else if (!"ERROR".equals(outcome)) {
+                    log.info("재고 처리 완료");
+                }
+            } finally {
+                MDC.remove("inventoryOutcome");
+            }
         }
     }
 }
