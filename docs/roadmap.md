@@ -397,11 +397,12 @@ CodeRabbit은 **GitHub App**이라 Actions 워크플로가 필요 없습니다. 
   - `observability/elk/filebeat.yml` + `docker-compose.elk.yml`의 `filebeat` 서비스. `./gradlew :xxx-service:bootRun`을 레포 루트에서 실행하면 모든 서비스 로그가 서비스별 디렉터리가 아니라 루트 `./logs/`에 모인다는 걸 사용자가 로컬에서 tail/ls로 확인해 잡아냈고, 마운트를 `./logs:/logs` 하나로 고쳐서 해결. `payment-logs` 데이터 스트림(4.2)에 정상 적재 확인
 - [x] **4.4** `traceId` 기반으로 하나의 주문이 4개 서비스를 지나간 로그를 한 번에 조회 가능한지 확인
   - 사용자가 실제 주문 1건을 생성해 ES 집계 쿼리로 확인 — traceId 하나에 order-service(120)/payment-service(52)/inventory-service(40)/notification-service(1) 문서가 모두 잡힘
-- [ ] **4.5** Kibana 대시보드 — 실패 사유별 분포, 시간대별 실패율, PG 응답시간 분포
+- [x] **4.5** Kibana 대시보드 — 실패 사유별 분포, 시간대별 실패율, PG 응답시간 분포
+  - 기존 로그엔 비즈니스 실패를 남기는 로그 자체가 없어서(Hibernate 디버그뿐, GlobalExceptionHandler도 무로깅) `pgOutcome`/`pgElapsedMs`/`failureReason`/`inventoryOutcome`을 MDC로 추가 계측(PaymentService, PaymentCompletedListener) — traceId와 동일한 방식. Kibana Lens 패널 3개(파이/라인+Formula/히스토그램)로 "Payment Lab — 4단계 로그 대시보드" 구성, 3.7 장애 시나리오 스크립트로 실측 데이터 채워 확인
 
 ### 완료 기준
-- 임의의 실패 결제 ID로 Kibana에서 traceId 기준으로 4개 서비스의 관련 로그를 한 번에 조회 가능
-- Kibana 대시보드에서 실패 사유별 분포, 시간대별 실패율, PG 응답시간 분포 확인 가능
+- [x] 임의의 실패 결제 ID로 Kibana에서 traceId 기준으로 4개 서비스의 관련 로그를 한 번에 조회 가능 (4.4)
+- [x] Kibana 대시보드에서 실패 사유별 분포, 시간대별 실패율, PG 응답시간 분포 확인 가능 (4.5)
 
 **(스킵 — 사용자 결정: 4단계는 로그 파이프라인만 진행, RAG/Agent 제외)**
 
