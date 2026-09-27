@@ -391,6 +391,7 @@ CodeRabbit은 **GitHub App**이라 Actions 워크플로가 필요 없습니다. 
 **4-A. 로그 파이프라인**
 - [x] **4.1** ES 단일 노드 + Kibana 구성 (힙 1~2GB로 제한) — `docker-compose.elk.yml`. 사용자가 로컬에서 Kibana(`localhost:5601`)에 인증 없이 접속되는 것으로 확인
 - [ ] **4.2** 인덱스 설계 — `payment-logs-*` : 원본 로그(ECS 포맷), ILM으로 보존기간 관리
+  - `payment-logs`를 데이터 스트림으로 구성(`observability/elk/index-template-payment-logs.json`) — hot 1일/1GB 롤오버 후 14일 뒤 삭제하는 ILM 정책(`observability/elk/ilm-policy-payment-logs.json`)을 붙였다. `scripts/setup-elk.sh`로 로컬 ES에 적용
   - (RAG 재개 시 추가) `payment-incidents`(이상거래/실패 사례 문서), `payment-knowledge`(벡터 임베딩, `dense_vector`)는 로그용 인덱스와 명확히 분리
 - [ ] **4.3** 적재 방식 — Filebeat 경유. 0단계에서 ECS JSON 파일 출력을 이미 켜뒀으므로 그대로 맞물립니다.
 - [ ] **4.4** `traceId` 기반으로 하나의 주문이 4개 서비스를 지나간 로그를 한 번에 조회 가능한지 확인
