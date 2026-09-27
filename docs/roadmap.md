@@ -27,7 +27,7 @@ README의 5단계 로드맵을 실제로 착수 가능한 태스크 단위로 �
 | **1** | 모놀리식 결제 코어 | 모놀리식 — 프로세스 1개 | + 자동 검증 테스트(조용한 실패 탐지) |
 | **2** | **MSA 전환** + Kafka Saga | **MSA — 프로세스 4개** | + 서비스별 이미지 매트릭스 빌드 |
 | **3** | 장애 방어 + 성능 검증 | MSA — 프로세스 4개 | + (선택) 야간 성능 회귀 잡 |
-| **4** | ELK + RAG Agent | MSA + 공통 관측 레이어 | + Secret 스캔 강화 (API 키 유출 방지) |
+| **4** | ELK (로그 파이프라인) — RAG/Agent는 범위 제외 | MSA + 공통 관측 레이어 | — |
 | **5** | Kubernetes 배포 | MSA — K8s 파드 | + CD 파이프라인 (GHCR 푸시 → 배포) |
 
 > **2단계가 모놀리식 → MSA 전환점입니다.** 1단계까지는 패키지만 나뉜 하나의 애플리케이션이고, 2단계에서 각 패키지가 독립 프로세스가 되면서 트랜잭션 경계가 깨집니다. Saga·Outbox·컨슈머 멱등성이 전부 2단계에 몰려 있는 이유입니다.
@@ -380,28 +380,28 @@ CodeRabbit은 **GitHub App**이라 Actions 워크플로가 필요 없습니다. 
 
 ---
 
-## 4단계 — ELK + RAG Agent
+## 4단계 — ELK (로그 파이프라인)
 
-> 목표: 로그를 검색 가능한 자산으로 만들고, 그 위에 LLM을 얹어 운영 지원 기능을 만든다.
+> 목표: 로그를 검색 가능한 자산으로 만든다.
 
-**"데이터 확보 → 검색 → RAG"** 순서를 지키세요. 데이터 없이 RAG부터 만들면 검증할 수가 없습니다.
-
-> **0단계에서 확정된 제약 2가지**
-> 1. **Spring AI 2.0 이상 필요.** 1.0/1.1은 Boot 3.4/3.5 대상이고 Boot 4에서 기동 자체가 실패합니다(설정으로 우회 불가). 인터넷의 1.0 기준 RAG 예제가 그대로 안 붙으니 공식 레퍼런스를 먼저 보세요.
-> 2. **Anthropic API에는 임베딩 엔드포인트가 없습니다.** 채팅 모델만 제공합니다. RAG에는 EmbeddingModel과 ChatModel 두 개가 필요하며, `spring-ai-starter-model-transformers`(로컬 ONNX)를 쓰면 추가 API 키 없이 해결됩니다.
+> **범위 조정 (사용자 결정):** 원래 계획에 있던 RAG/Agent(4-C~4-F)와 그 선행 데이터 작업(4-B)은 이번 단계 범위에서 제외합니다. 4단계는 **로그 파이프라인(4-A)까지만** 진행하며, 아래 4-B~4-F는 스킵 처리하고 태스크 번호는 기록용으로 남겨둡니다. 필요해지면 이후 별도 단계에서 재검토합니다.
 
 ### 태스크
 
 **4-A. 로그 파이프라인**
 - [ ] **4.1** ES 단일 노드 + Kibana 구성 (힙 1~2GB로 제한)
-- [ ] **4.2** 인덱스 설계 — **로그용과 벡터용 인덱스를 명확히 분리**
-  - `payment-logs-*` : 원본 로그(ECS 포맷), ILM으로 보존기간 관리
-  - `payment-incidents` : 이상거래/실패 사례 문서 (구조화)
-  - `payment-knowledge` : 벡터 임베딩 저장 (`dense_vector`)
+- [ ] **4.2** 인덱스 설계 — `payment-logs-*` : 원본 로그(ECS 포맷), ILM으로 보존기간 관리
+  - (RAG 재개 시 추가) `payment-incidents`(이상거래/실패 사례 문서), `payment-knowledge`(벡터 임베딩, `dense_vector`)는 로그용 인덱스와 명확히 분리
 - [ ] **4.3** 적재 방식 — Filebeat 경유. 0단계에서 ECS JSON 파일 출력을 이미 켜뒀으므로 그대로 맞물립니다.
 - [ ] **4.4** `traceId` 기반으로 하나의 주문이 4개 서비스를 지나간 로그를 한 번에 조회 가능한지 확인
   - R.CI6의 Tracing 검증 테스트가 통과 상태여야 성립합니다
 - [ ] **4.5** Kibana 대시보드 — 실패 사유별 분포, 시간대별 실패율, PG 응답시간 분포
+
+### 완료 기준
+- 임의의 실패 결제 ID로 Kibana에서 traceId 기준으로 4개 서비스의 관련 로그를 한 번에 조회 가능
+- Kibana 대시보드에서 실패 사유별 분포, 시간대별 실패율, PG 응답시간 분포 확인 가능
+
+**(스킵 — 사용자 결정: 4단계는 로그 파이프라인만 진행, RAG/Agent 제외)**
 
 **4-B. 이상거래 데이터 생성**
 - [ ] **4.6** 이상거래 판정 룰 정의 — 짧은 시간 내 반복 결제, 비정상 금액, 동일 카드 다중 주문 등 (룰 기반이면 충분. ML까지 갈 필요 없음)
@@ -416,9 +416,9 @@ CodeRabbit은 **GitHub App**이라 Actions 워크플로가 필요 없습니다. 
 - [ ] **4.13** 프롬프트 설계 — **반드시 근거 문서 ID를 함께 반환**하게 만들어 환각을 검증 가능하게
 - [ ] **4.14** API 구현 — `POST /ai/analyze`
 
-**4-D. 보안 (이 단계에서 새로 생기는 리스크)**
+**4-D. 보안 (RAG/Agent 진행 시에만 해당)**
 - [ ] **4.15** **API 키 관리** — `ANTHROPIC_API_KEY`는 GitHub Secrets, 로컬은 `.env`(gitignore 확인)
-- [ ] **4.16** Secret 스캔 강화 — Trivy `--scanners secret`와 Semgrep `p/secrets`가 이미 돌고 있지만, 4단계는 **키가 실제로 존재하는 첫 단계**입니다. R.G3의 gitleaks 스캔을 한 번 더 돌리세요.
+- [ ] **4.16** Secret 스캔 강화 — Trivy `--scanners secret`와 Semgrep `p/secrets`가 이미 돌고 있지만, 키가 실제로 존재하는 첫 단계라면 R.G3의 gitleaks 스캔을 한 번 더 돌리세요.
 - [ ] **4.17** 로그에 프롬프트/응답 원문을 남기지 않기 — ES에 그대로 적재되면 결제 데이터가 LLM 컨텍스트와 함께 평문으로 쌓입니다
 - [ ] **4.18** 비용 상한 — 토큰 사용량 메트릭 + 호출 횟수 제한
 
@@ -432,7 +432,7 @@ CodeRabbit은 **GitHub App**이라 Actions 워크플로가 필요 없습니다. 
 - [ ] **4.23** 검색 품질 측정 — 기대 문서가 상위 K개에 들어오는 비율
 - [ ] **4.24** 비용 추적 — 호출당 토큰/비용을 메트릭으로
 
-### 완료 기준
+**(RAG/Agent 진행 시 완료 기준 — 참고용, 현재 범위 아님)**
 - 임의의 실패 결제 ID로 질의 → 유사 과거 사례 3건과 함께 원인 분석 응답
 - 답변에 인용된 문서 ID가 실제 incident와 일치 (환각 검증 통과)
 - 골든셋 20문항 중 검색 정확도 기록
@@ -608,7 +608,7 @@ compose 파일을 프로파일별로 쪼개고(`docker-compose.base.yml`, `.kafk
 - Kafka: KRaft 모드로 Zookeeper 제거, 힙 512MB
 - 앱: `-Xmx512m` (부하 테스트 때는 예외)
 - Kibana는 필요할 때만 기동
-- ES/Spring AI 의존성은 4단계 전까지 주석 처리 (기동 35초 → 17초)
+- ES 의존성은 4단계 전까지 주석 처리 (기동 35초 → 17초). Spring AI는 RAG 범위 제외로 추가하지 않음
 
 ---
 
@@ -617,14 +617,14 @@ compose 파일을 프로파일별로 쪼개고(`docker-compose.base.yml`, `.kafk
 | 리스크 | 상태 | 대응 |
 |---|---|---|
 | Boot 4 조용한 실패 | **확인됨** (Flyway/AOP/Tracing) | R.CI6 자동 검증 테스트로 고정 |
-| Spring AI 1.x Boot 4 비호환 | **확인됨** (기동 실패, 우회 불가) | 4단계에서 Spring AI 2.0 사용 |
-| Anthropic 임베딩 모델 부재 | **확인됨** | `spring-ai-starter-model-transformers` 병행 |
+| Spring AI 1.x Boot 4 비호환 | **확인됨** (기동 실패, 우회 불가) | RAG 범위 제외로 현재 해당 없음 — 재개 시 Spring AI 2.0 사용 |
+| Anthropic 임베딩 모델 부재 | **확인됨** | RAG 범위 제외로 현재 해당 없음 — 재개 시 `spring-ai-starter-model-transformers` 병행 |
 | Trivy 게이트 상시 실패로 무력화 | 예상 | 베이스 이미지 교체(5.2) + `ignore-unfixed` + 만료일 있는 `.trivyignore` (E-1) |
 | CI 시간이 길어져 PR이 느려짐 | 예상 | 캐시 → 잡 분리 → 무거운 테스트는 nightly로 (E-3) |
 | required check 미등록으로 게이트 무력 | 예상 | R.CI10에서 실제 차단을 눈으로 확인 |
 | paths 필터로 PR 영구 블로킹 | 예상 | 워크플로 레벨 `paths:` 금지, 잡 내부 필터링 (R.G10) |
 | 2단계 분량 과다 | 예상 | 2-B(Kafka 기반)까지를 별도 마일스톤으로 끊고 중간 점검 |
-| 4단계 RAG가 "데모"에 그침 | 예상 | 4-F 평가 태스크 필수 수행 |
+| 4단계 RAG가 "데모"에 그침 | RAG 범위 제외로 현재 해당 없음 | 재개 시 4-F 평가 태스크 필수 수행 |
 | 5단계 리소스 부족 | 예상 | 미들웨어를 클러스터 밖에 두는 하이브리드 (5.5) |
 | 벤치마크 숫자가 노이즈 | 예상 | 워밍업 후 3회 반복 중앙값, CI 러너에서 절대값 측정 금지 |
 
@@ -1349,7 +1349,7 @@ flowchart TB
 | 0005 | 재고 차감 락 전략 최종 선택 | `benchmarks/01` | 1.13 이후 |
 | 0006 | 캐싱 대상에서 재고를 제외 | 1.16 판단 기록 | 1.16 |
 | 0007 | Resilience4j 데코레이터 적용 순서 | 3.1 실험 결과 | 3.1 |
-| 0008 | 검색을 벡터 단독이 아닌 하이브리드로 | `benchmarks/05` | 4.11 |
+| 0008 | 검색을 벡터 단독이 아닌 하이브리드로 | `benchmarks/05` | 4.11 (RAG 범위 제외로 현재 보류) |
 | 0009 | trunk-based + Ruleset 필수 게이트 | R단계 선행 결정 | R.G9 |
 | 0010 | Critical/High 차단 정책과 예외 기준 | 부록 E-1 | R.CI4 |
 | 0011 | 미들웨어를 K8s 클러스터 밖에 배치 | 5.5 | 5.5 |
@@ -1405,7 +1405,7 @@ flowchart TB
 | `02-concurrency.md` | 데드락, 낙관적 락 재시도 폭주, 커넥션 풀 고갈 | 1 |
 | `03-kafka-saga.md` | 컨슈머 리밸런싱, 중복 소비, DLQ, Outbox 릴레이 지연 | 2 |
 | `04-resilience.md` | 데코레이터 순서, 타임아웃 전파, Bulkhead 고갈 | 3 |
-| `05-elk-rag.md` | ES 힙, 인덱스 매핑 충돌, Spring AI 2.0 API 변경 | 4 |
+| `05-elk.md` | ES 힙, 인덱스 매핑 충돌 (RAG 재개 시 Spring AI 관련 문제 추가) | 4 |
 | `06-kubernetes.md` | probe 타이밍, graceful shutdown, 이미지 풀, 리소스 부족 | 5 |
 
 ## G-5. stages/ — 단계별 결과물
@@ -1458,7 +1458,7 @@ flowchart TB
 | **1** | `architecture/erd.md`, `benchmarks/00`·`01`·`02`, `troubleshooting/02`, ADR-0001·0005·0006, `stages/02-payment-core.md` |
 | **2** | `architecture/overview.md`·`event-catalog.md`·`saga-flow.md`, `benchmarks/03`, `troubleshooting/03`, ADR-0002·0003·0004, `stages/03-msa-saga.md` |
 | **3** | `benchmarks/04` (장애 시나리오 결과 포함), `troubleshooting/04`, ADR-0007, `stages/04-resilience.md` |
-| **4** | `benchmarks/05`, `troubleshooting/05`, ADR-0008, `stages/05-elk-rag.md` |
+| **4** | `benchmarks/05`, `troubleshooting/05`, `stages/05-elk.md` (ADR-0008은 RAG 재개 시) |
 | **5** | `architecture/infrastructure.md`, `troubleshooting/06`, ADR-0011·0012, `stages/06-kubernetes.md` |
 
 > **PR 템플릿과 연동**: 부록 D-1의 "측정값" 항목에 벤치마크 문서 링크를, "왜" 항목에 ADR 링크를 넣도록 습관화하면 문서가 코드와 같이 자랍니다. 나중에 몰아 쓰는 일이 없어집니다.
@@ -1488,7 +1488,7 @@ flowchart TB
 | `02-payment-core.md` | 1단계 |
 | `03-msa-saga.md` | 2단계 |
 | `04-resilience.md` | 3단계 |
-| `05-elk-rag.md` | 4단계 |
+| `05-elk.md` | 4단계 |
 | `06-kubernetes.md` | 5단계 |
 
 `troubleshooting/`도 동일한 오프셋을 씁니다(`01-ci-pipeline.md` = R단계). `benchmarks/`는 단계가 아니라 측정 주제 순서입니다.
