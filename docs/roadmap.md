@@ -367,9 +367,11 @@ CodeRabbit은 **GitHub App**이라 Actions 워크플로가 필요 없습니다. 
   - 각각 TPS / p50 / p95 / p99 / 에러율
   - `benchmarks/01-lock-strategies.md` ~ `06-cache.md` 실측 완료 + `benchmarks/07-summary.md`로 4축 종합(PR #97). p99는 모놀리식 vs MSA/서킷 유무 두 축에서 원본 미수집이라 사후 추정 없이 "미측정"으로 명시. 로컬 측정 환경(인텔리제이+Docker Desktop/WSL2 동시 구동) 노이즈로 p95/p99 절대값 신뢰 구간이 넓다는 점을 교차 축 공통 한계로 기록.
   - **후속 작업(TODO)**: 모놀리식 vs MSA(`03-baseline.md`/`04-saga-comparison.md`)와 서킷 유무(`05-circuit-breaker.md`) 두 축은 p99가 비어 있다(CodeRabbit 리뷰, PR #98) — 락/캐시 축이 이미 쓰는 `--summary-trend-stats="avg,min,med,max,p(90),p(95),p(99)"`를 해당 k6 실행에도 추가해 재측정하면 채울 수 있다. 나머지 산출물(4축 비교표, 방법론적 한계 기록)이 이미 존재하므로 이 재측정 전까지도 체크 완료 상태를 유지하되, 완료 전 남은 갭으로 여기 명시해둔다.
-- [ ] **3.13** Grafana 대시보드 정리 — 서킷 상태, PG 응답시간, Saga 단계별 소요시간
-- [ ] **3.14** **(선택) 야간 성능 회귀 워크플로** — `schedule` 트리거로 k6 smoke를 돌려 p95가 기준치를 넘으면 이슈 자동 생성
+- [x] **3.13** Grafana 대시보드 정리 — 서킷 상태, PG 응답시간, Saga 단계별 소요시간
+  - 서킷 상태(3.8)는 기존 패널 재사용. Saga 단계별 소요시간은 계측이 아예 없어서 새로 추가(PR #98) — payment/inventory/notification-service의 실제 스텝 처리 리스너에 `saga.step.duration` Timer. PG 응답시간은 처음엔 `resilience4j.circuitbreaker.calls`(자동 계측)를 썼는데, 로컬 실측(사용자 확인)으로 이 메트릭이 실제 호출에도 count=0으로 남는 걸 발견 — CircuitBreaker 상태 게이지(폴링 방식)는 정상인데 calls Timer(이벤트 구독 방식)만 안 도는 걸로 봐서 이 프로젝트가 겪어온 "Boot 4 조용한 실패" 패턴과 같은 종류로 의심된다. 라이브러리 배선을 더 파는 대신 `pg.response.time`을 직접 계측(PaymentService, saga.step.duration과 같은 패턴)해 우회했다. 사용자가 로컬에서 재시작 전/후 두 메트릭을 나란히 비교해 이 gap을 직접 확인 후 패널 2개(PG 응답시간/Saga 단계별 소요시간) 모두 실측 검증 완료.
+- [ ] **3.14** **(선택, 스킵) 야간 성능 회귀 워크플로** — `schedule` 트리거로 k6 smoke를 돌려 p95가 기준치를 넘으면 이슈 자동 생성
   - PR마다 돌리기엔 무겁고 러너 성능 편차가 커서 노이즈가 큽니다. 절대값 비교는 로컬에서, CI는 "급격한 악화 감지" 용도로만 쓰세요.
+  - 선택 항목이라 3단계 범위에서 스킵하기로 결정(사용자 확인). 필요해지면 이후 단계에서 재검토.
 
 ### 완료 기준
 - PG 완전 다운 상태에서도 주문 API가 3초 안에 응답 (전체 장애 전파 없음)
