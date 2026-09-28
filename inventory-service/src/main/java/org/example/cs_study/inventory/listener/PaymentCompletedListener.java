@@ -140,7 +140,12 @@ public class PaymentCompletedListener {
                     } finally {
                         MDC.remove("failureReason");
                     }
-                } else if (!"ERROR".equals(outcome)) {
+                } else if ("ERROR".equals(outcome)) {
+                    // failureReason은 올리지 않는다(확정된 재고 실패가 아니라 재시도 대상) —
+                    // 그래도 재시도가 얼마나 자주 도는지는 보여야 하므로 경고로 남긴다
+                    // (CodeRabbit 리뷰, PR #101). 예외는 여기서 삼키지 않고 그대로 전파된다.
+                    log.warn("재고 처리 시도 실패(재시도 대상)");
+                } else {
                     log.info("재고 처리 완료");
                 }
             } finally {
