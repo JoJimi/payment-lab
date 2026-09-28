@@ -47,7 +47,7 @@ subprojects {
             dependency("org.apache.tomcat.embed:tomcat-embed-core:11.0.26")
             dependency("org.apache.tomcat.embed:tomcat-embed-el:11.0.26")
             dependency("org.apache.tomcat.embed:tomcat-embed-websocket:11.0.26")
-            dependency("at.yawk.lz4:lz4-java:1.11.3")
+            dependency("at.yawk.lz4:lz4-java:1.12.0")
         }
     }
 
