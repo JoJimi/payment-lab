@@ -16,6 +16,9 @@ import org.example.cs_study.payment.domain.PaymentStatus;
 import org.example.cs_study.payment.dto.request.RequestPaymentRequest;
 import org.example.cs_study.payment.dto.response.PaymentResponse;
 import org.example.cs_study.payment.repository.PaymentRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -24,6 +27,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 @Service
 public class PaymentService {
+
+    private static final Logger log = LoggerFactory.getLogger(PaymentService.class);
 
     private final PaymentRepository paymentRepository;
     private final OrderValidator orderValidator;
@@ -104,12 +109,36 @@ public class PaymentService {
         // 패턴으로 직접 계측해 신뢰할 수 있는 지표를 확보한다.
         Timer.Sample sample = Timer.start(meterRegistry);
         String outcome = "ERROR";
-        MockPgResult result;
+        long startNanos = System.nanoTime();
+        MockPgResult result = null;
         try {
             result = mockPgGateway.requestPayment(idempotencyKey, request.amount(), request.currency());
             outcome = result.outcome().name();
         } finally {
             sample.stop(meterRegistry.timer("pg.response.time", "outcome", outcome));
+            // 4.5 — Kibana "PG 응답시간 분포"/"실패 사유별 분포" 패널용. traceId(TraceContext)와
+            // 같은 방식으로 MDC에 실어서 Boot 내장 ECS 인코더가 최상위 필드로 그대로 내보내게
+            // 한다(관측용 필드라 Payment 엔티티에는 남기지 않는다 — DB에 남기는 건 도메인
+            // 상태(payment.result 카운터, 4.5 전 이미 있던 것)만으로 충분하다).
+            long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
+            MDC.put("pgOutcome", outcome);
+            MDC.put("pgElapsedMs", String.valueOf(elapsedMs));
+            try {
+                if ("APPROVED".equals(outcome)) {
+                    log.info("PG 응답 완료");
+                } else {
+                    String reason = result != null && result.errorCode() != null ? result.errorCode() : outcome;
+                    MDC.put("failureReason", reason);
+                    try {
+                        log.warn("PG 응답 실패");
+                    } finally {
+                        MDC.remove("failureReason");
+                    }
+                }
+            } finally {
+                MDC.remove("pgOutcome");
+                MDC.remove("pgElapsedMs");
+            }
         }
         // mockPgGateway가 대기 중 인터럽트를 받으면 UNKNOWN(TIMEOUT)을 반환하면서 인터럽트
         // 상태를 복원해둔다(CodeRabbit 리뷰, PR #88). 그 상태 그대로 applyResult의 트랜잭션에
