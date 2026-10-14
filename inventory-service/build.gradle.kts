@@ -25,8 +25,8 @@ dependencies {
     // ---- Redis 캐싱 / 분산락 ----
     implementation("org.springframework.boot:spring-boot-starter-data-redis")
     implementation("org.springframework.boot:spring-boot-starter-cache")
-    implementation("org.redisson:redisson-spring-boot-starter:4.7.0")
-    implementation("org.redisson:redisson-spring-cache:4.7.0")
+    implementation("org.redisson:redisson-spring-boot-starter:4.8.0")
+    implementation("org.redisson:redisson-spring-cache:4.8.0")
 
     // ---- 모니터링 / 성능 측정 ----
     implementation("org.springframework.boot:spring-boot-starter-actuator")
