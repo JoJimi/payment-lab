@@ -44,9 +44,9 @@ subprojects {
         // Tomcat: FORM 인증 우회 / DIGEST 재전송 공격 / 접근 제어 우회 (11.0.24 → 11.0.26)
         // lz4-java: XXHash JNI 검증 미흡으로 인한 DoS (1.10.1 → 1.11.3)
         dependencies {
-            dependency("org.apache.tomcat.embed:tomcat-embed-core:11.0.26")
-            dependency("org.apache.tomcat.embed:tomcat-embed-el:11.0.26")
-            dependency("org.apache.tomcat.embed:tomcat-embed-websocket:11.0.26")
+            dependency("org.apache.tomcat.embed:tomcat-embed-core:11.0.27")
+            dependency("org.apache.tomcat.embed:tomcat-embed-el:11.0.27")
+            dependency("org.apache.tomcat.embed:tomcat-embed-websocket:11.0.27")
             dependency("at.yawk.lz4:lz4-java:1.11.3")
         }
     }
